@@ -41,6 +41,13 @@ class BrawlStarsError(Exception):
         super().__init__(f"HTTP {status}: {message}")
 
 
+class AuthError(BrawlStarsError):
+    """401/403 — bad token, or this machine's public IP fell off the key's allow-list
+    (residential IPs rotate). Unlike a 404, this is fatal for the whole run, not one
+    request: every subsequent call fails the same way, so callers must stop and alert
+    rather than skip — swallowing it burns the scan queue collecting nothing."""
+
+
 class RateLimited(BrawlStarsError):
     """429 — retried with backoff."""
 
@@ -116,10 +123,15 @@ class BrawlStarsClient:
         if code == 404:
             raise BrawlStarsError(code, f"not found: {path}")
         if code in (401, 403):
-            raise BrawlStarsError(
+            try:
+                reason = resp.json().get("reason", "")
+            except ValueError:
+                reason = ""
+            raise AuthError(
                 code,
-                "auth/IP error — check the token and that this machine's current public "
-                "IP is on the key's allow-list",
+                f"{reason or 'auth/IP error'} — check the token and that this machine's "
+                "current public IP is on the key's allow-list "
+                "(https://developer.brawlstars.com)",
             )
         raise BrawlStarsError(code, resp.text[:200])
 

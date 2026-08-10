@@ -22,13 +22,18 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 from bsdraft.collect import publish as publisher
-from bsdraft.collect.client import BrawlStarsClient
+from bsdraft.collect.client import AuthError, BrawlStarsClient
 from bsdraft.collect.crawler import MATCHES_PATH, Crawler
 from bsdraft.config import settings
-from bsdraft.constants import PROCESSED_DIR, REPO_ROOT
+from bsdraft.constants import PROCESSED_DIR, RAW_DIR, REPO_ROOT
 from bsdraft.engine.drift import detect_drift, save_report
+
+# Written when every request fails auth (key/IP broken); cleared on the next good crawl.
+# The keep-warm workflow's data-staleness issue tells the human to look for this file.
+STALLED_SENTINEL = RAW_DIR / "COLLECT_STALLED"
 
 
 async def _run(target: int, countries: list, revisit_after: float) -> int:
@@ -46,6 +51,38 @@ async def _run(target: int, countries: list, revisit_after: float) -> int:
         print(f"\nDone. +{new} new matches  ->  {MATCHES_PATH}")
         print(f"Total unique matches: {len(crawler.seen_matches)}")
         return new
+
+
+def _alert_stalled(err: Exception) -> None:
+    """Fail LOUDLY on an auth/IP error: every request 403s until a human fixes the key's
+    allow-list (the home IP rotated off it once and the crawler ran a month collecting
+    nothing, silently). Sentinel file + stderr + best-effort macOS notification."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"\n!!! COLLECT STALLED at {now}: {err}", file=sys.stderr)
+    print("!!! Every request is failing auth — fix the Supercell key's IP allow-list at "
+          "https://developer.brawlstars.com (or mint a new key), then update .env.",
+          file=sys.stderr)
+    try:
+        RAW_DIR.mkdir(parents=True, exist_ok=True)
+        STALLED_SENTINEL.write_text(f"{now}\n{err}\n", encoding="utf-8")
+    except OSError as e:
+        print(f"(could not write sentinel {STALLED_SENTINEL}: {e})", file=sys.stderr)
+    if sys.platform == "darwin":  # the crawler lives on the home Mac
+        try:
+            subprocess.run(
+                ["osascript", "-e",
+                 'display notification "Auth/IP error — every request failing. '
+                 'See data/raw/COLLECT_STALLED." with title "Brawl Stars crawler stalled"'],
+                check=False, capture_output=True, timeout=10,
+            )
+        except Exception:  # noqa: BLE001 — the notification is a bonus, never a failure
+            pass
+
+
+def _clear_stalled() -> None:
+    if STALLED_SENTINEL.exists():
+        print("auth recovered — clearing the COLLECT_STALLED sentinel.")
+        STALLED_SENTINEL.unlink(missing_ok=True)
 
 
 def _try_publish() -> None:
@@ -217,12 +254,20 @@ async def _loop(target: int, countries: list, interval: int, do_publish: bool,
         print(f"\n=== crawl cycle {cycle} ===")
         try:
             await _run(target, countries, revisit_after)
+            _clear_stalled()
             if do_publish:
                 _try_publish()
                 _publish_stats()
                 _publish_rank_index()
             if meta_check:
                 _check_meta(retrain_on_shift, publish=do_publish)
+        except AuthError as e:
+            # Alert but don't die (launchd would respawn us into the same wall) and don't
+            # publish — retry next cycle in case the allow-list gets fixed meanwhile.
+            _alert_stalled(e)
+            print(f"sleeping {interval}s before retrying …  (Ctrl-C to stop)")
+            await asyncio.sleep(interval)
+            continue
         except Exception as e:  # noqa: BLE001 — one bad cycle (network drop, publish hiccup)
             # must never kill the daemon; log it and retry after the normal sleep. Without this
             # a transport error crashed the process, forcing a launchd restart + a full
@@ -264,10 +309,14 @@ def main() -> None:
                               args.meta_check, args.retrain_on_shift, revisit_after))
         else:
             asyncio.run(_run(args.target, countries, revisit_after))
+            _clear_stalled()
             if args.publish:
                 _try_publish()
             if args.meta_check:
                 _check_meta(args.retrain_on_shift, publish=args.publish)
+    except AuthError as e:  # loop mode handles this per-cycle; one-shot fails loudly
+        _alert_stalled(e)
+        sys.exit(2)
     except KeyboardInterrupt:
         print("\nstopped.")
 

@@ -27,7 +27,7 @@ from typing import Iterable
 import httpx
 from tqdm import tqdm
 
-from bsdraft.collect.client import BrawlStarsClient, BrawlStarsError, normalize_tag
+from bsdraft.collect.client import AuthError, BrawlStarsClient, BrawlStarsError, normalize_tag
 from bsdraft.collect.match import parse_match
 from bsdraft.constants import RAW_DIR
 
@@ -114,6 +114,8 @@ class Crawler:
         for country in countries:
             try:
                 players = await self.client.get_top_players(country)
+            except AuthError:
+                raise  # key/IP is broken — every call will fail; don't shrug it off per-country
             except BrawlStarsError:
                 continue
             for p in players:
@@ -170,8 +172,15 @@ class Crawler:
                     if not await self._await_reconnect():
                         break
                     continue
+                except AuthError:
+                    # The key/IP is broken, not this player — every subsequent call fails the
+                    # same way. Don't mark it scanned; re-enqueue and surface it so the run stops
+                    # and collect.py can alert, instead of swallowing the 403 and stamping the
+                    # whole queue "scanned" with zero data (a month of that once burned the queue).
+                    self._enqueue(tag)
+                    raise
                 except BrawlStarsError:
-                    # A real per-tag failure (private profile, 404, auth) — mark scanned so we
+                    # A real per-tag failure (private profile, 404) — mark scanned so we
                     # don't hammer it again until the revisit window elapses.
                     self._mark_scanned(tag, vis)
                     continue
