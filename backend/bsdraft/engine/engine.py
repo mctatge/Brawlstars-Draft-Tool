@@ -71,7 +71,9 @@ class DraftEngine:
         return composition_mod.analyze(state)
 
     def game_plan(self, state: DraftState) -> dict:
-        return gameplan_mod.game_plan(state)
+        """Post-draft plan. Gets the same bracket stats table and model the pick board scores
+        with, so the data-backed half of the plan reads from exactly what ranked the picks."""
+        return gameplan_mod.game_plan(state, self._stats_for(state), self.model)
 
     def composition(self, state: DraftState) -> dict:
         counts = Counter(_class_of(b) for b in state.our_team)

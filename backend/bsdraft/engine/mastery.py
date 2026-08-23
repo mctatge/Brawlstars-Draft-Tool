@@ -1,12 +1,16 @@
 """Player roster & mastery.
 
-Personalizes recommendations to brawlers the player actually owns and is invested in. ``score``
-reads exactly two things: the owned **star powers / gadgets / gears** (``build``) and personal
-trophies (``comfort``). Power level and hypercharge are carried on :class:`Mastery` but stay out
-of the score. Power is excluded on purpose — an under-floor brawler is unfieldable and already
-filtered out upstream, so the comparison here is between brawlers that all clear the floor (see
-the comments on ``score`` and ``gaps``). Hypercharge is simply not part of the ``build`` term;
-it surfaces only as a UI hint via ``gaps``.
+Parses the live `/players/{tag}` roster into per-brawler ownership, and carries two views of it.
+
+``score`` is an **investment index** in [0,1] — owned star powers / gadgets / gears (``build``)
+plus personal trophies (``comfort``). It is DISPLAY ONLY: nothing multiplies it into a pick score
+any more, because a unitless 0..1 index blended with win-rate-shaped signals overstates a built
+brawler by tens of points. Power level and hypercharge stay out of it.
+
+``fielded`` is the view the scorer actually uses — power level, owned loadout and gear count,
+priced in win-rate points by :mod:`bsdraft.engine.readiness`. That is where power and hypercharge
+are accounted for: power as a measured deficit, hypercharge as an explicitly *unpriced* reason,
+since battle logs never record it. See docs/readiness.md.
 
 Buffies are left out too. The `/players/{tag}` roster does carry a per-brawler
 `buffies: {"gadget": bool, "starPower": bool, "hyperCharge": bool}` object, but its `True` flags
@@ -20,6 +24,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
+
+from bsdraft.engine.readiness import (
+    GAP_NO_GADGET,
+    GAP_NO_HYPERCHARGE,
+    GAP_NO_STAR_POWER,
+    Fielded,
+)
 
 
 @dataclass
@@ -56,26 +67,35 @@ class Mastery:
 
     @property
     def score(self) -> float:
-        # This ranks *investment* among brawlers the player can actually field. Power level is left
-        # out on purpose: a brawler below the bracket's power floor is unselectable and gets dropped
-        # upstream (see ``tiers.min_power_for_bracket`` / the API's ``_roster_for``), so it never
-        # reaches this scorer; among those that do, what the player controls is the loadout (you can
-        # only equip the star powers / gadgets / gears you own) and how much they've played
-        # it. So the score is loadout-forward, comfort second (a maxed but under-built brawler is
-        # still under-built). (The Power 9–10 window that survives the floor below Mythic isn't
-        # modelled here — the dataset's win rates already fold real power in.)
+        # An *investment* index in [0,1] — DISPLAY ONLY as of the readiness change. Nothing
+        # multiplies this into a pick score any more: it is a unitless fraction, and blending it
+        # with win-rate-shaped signals is exactly the bug `engine/scoring.py` now avoids. What the
+        # score path uses instead is :meth:`fielded`, priced in win-rate points by
+        # :mod:`bsdraft.engine.readiness`.
+        #
+        # Power stays out of *this* number because it ranks investment among brawlers that all
+        # clear the floor. It emphatically does NOT mean power is free: within-player measurement
+        # puts a Power 9 copy ~9 points of win rate below a maxed one (docs/readiness.md), which is
+        # what `readiness` now charges. An earlier version of this comment claimed "the dataset's
+        # win rates already fold real power in" — 97.3% of the corpus is Power 11, so they do not.
         return max(0.0, min(1.0, 0.60 * self.build + 0.40 * self.comfort))
 
+    def fielded(self) -> "Fielded":
+        """The readiness view: what this copy can actually put on the board. Used by the scorer on
+        the home host, where the server roster hands real :class:`Mastery` objects to scoring."""
+        return Fielded.from_mastery(self)
+
     def gaps(self) -> List[str]:
-        # Power level isn't a gap here: an under-floor brawler is unfieldable and filtered out before
-        # scoring, so anything that reaches this list clears the floor. Only the owned loadout remains.
+        # Loadout gaps only. Power isn't listed here because an under-floor brawler is unfieldable
+        # and filtered out before scoring — but the Power 9-10 window that *survives* the floor is
+        # priced by `readiness`, and surfaced there as its own reason rather than as a gap string.
         out: List[str] = []
         if not self.has_starpower:
-            out.append("no star power")
+            out.append(GAP_NO_STAR_POWER)
         if not self.has_gadget:
-            out.append("no gadget")
+            out.append(GAP_NO_GADGET)
         if not self.has_hypercharge:
-            out.append("no hypercharge")
+            out.append(GAP_NO_HYPERCHARGE)
         return out
 
 

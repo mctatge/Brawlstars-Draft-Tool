@@ -23,7 +23,11 @@ engine fuses the model with empirical stats built at startup from the same match
   (Diamond/Masters bracket labels), `stats_store.py` (loads the precomputed stats artifact),
   `rank_store.py` (loads the precomputed rank-index artifact into a compact NumPy lookup),
   `drift.py` (staleness/liveness), and `composition.py` + `gameplan.py` (team-composition
-  reasoning surfaced through the API).
+  reasoning surfaced through the API). `gameplan.py` is two layers: a rule-based strategic plan
+  that needs only the `DraftState`, plus a data-backed read (head-to-head grid, per-map form, ally
+  pairs, the model's win prob for the finished draft) that takes the bracket `DraftStats` and the
+  model from `DraftEngine`. Both halves degrade independently — no stats/model yields exactly the
+  rule-based plan, and each data section drops out when its cells fall under its sample floor.
 - `api/` — FastAPI app (`api/main.py`).
 
 ## Four cross-cutting design decisions

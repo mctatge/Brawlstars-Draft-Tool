@@ -25,9 +25,46 @@ export type BanRec = {
 export type Warning = { text: string; severity: string };
 export type RoleTip = { name: string; cls: string; role: string };
 export type ThreatTip = { name: string; cls: string; tip: string };
+export type EnemyRead = { archetype: string; playstyle: string; clash: string };
+// One of your brawlers' win rate on this map. `tag` is anchor / solid / weak.
+export type MapForm = { name: string; cls: string; winrate: number; games: number; tag: string };
+export type PairRate = { a: string; b: string; winrate: number; games: number; edge: string };
+// `winrate` is null when that (ours, theirs) cell has too thin a sample to show.
+export type H2HCell = { name: string; winrate: number | null; games: number; edge: string };
+export type H2HRow = {
+  enemy: string; enemy_cls: string; vs: H2HCell[]; mean: number | null;
+  mean_cells?: number;   // how many cells survived the floor to form `mean`
+  mean_games?: number;   // their combined effective sample
+};
+export type H2HCallout = {
+  ours?: string | null; theirs?: string | null; enemy?: string | null; enemy_cls?: string | null;
+  name?: string | null; winrate?: number | null; games?: number | null;
+  cells?: number | null;  // focus only: how many cells its average is over
+  edge?: string | null;
+};
+export type HeadToHead = {
+  grid: H2HRow[];
+  // Each is independently null: `focus` needs a row averaging 2+ surviving cells and a sub-even
+  // average, `best` a cell above even, `danger` one below. A grid with nothing to say on an axis
+  // omits that chip instead of inventing one, so never assume all three are present.
+  focus: H2HCallout | null;    // the enemy your comp does worst against overall
+  danger: H2HCallout | null;   // your worst losing cell
+  best: H2HCallout | null;     // your best winning cell
+};
+export type ModelRead = { win_prob: number; verdict: string; note: string };
 export type GamePlan = {
   objective: string; win_condition: string; archetype: string; playstyle: string;
   roles: RoleTip[]; threats: ThreatTip[]; tips: string[]; avoid: string[]; compensate: string[];
+  // Data-backed half — each is independently empty/null when its cells are too thin to speak
+  // from. Backed by the same collected matches + win-prob model that rank the pick board.
+  // Optional because the frontend and the API deploy separately: a Pages build can go live
+  // against a Render instance that predates these fields, so the panel must read them
+  // defensively (`?? []`) rather than assume they're on the wire.
+  enemy?: EnemyRead | null;
+  map_read?: MapForm[];
+  pairs?: PairRate[];
+  head_to_head?: HeadToHead | null;
+  model_read?: ModelRead | null;
 };
 export type RecommendResponse = {
   phase: string; picks: PickRec[]; bans: BanRec[];

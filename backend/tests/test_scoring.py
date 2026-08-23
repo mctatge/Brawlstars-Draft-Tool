@@ -1,8 +1,10 @@
 """Unit tests for the pick-scoring signal fusion (bsdraft.engine.scoring).
 
-Guards the 2026-08-17 mastery/personal de-weight: a clearly stronger *meta* pick must
-outrank a maxed-out *comfort* pick, so the personalized board stops burying meta brawlers the
-player hasn't personally mastered. Stub stats keep the assertions off the live dataset.
+Guards the separation of the objective blend from personalization. The five ablation-tuned signals
+produce a ``base_score``; personalization applies afterwards as signed win-rate-point adjustments
+(:mod:`bsdraft.engine.readiness`). So a clearly stronger *meta* pick outranks a maxed-out *comfort*
+pick, and — stronger than the 2026-08-17 de-weight this replaces — mastery cannot move a score at
+all. Stub stats keep the assertions off the live dataset.
 
     PYTHONPATH=backend python -m pytest backend/tests/test_scoring.py
 """
@@ -20,9 +22,6 @@ from bsdraft.engine.stats import DraftStats
 SHELLY, COLT, BULL = 16000000, 16000001, 16000002
 JESSIE = 16000007          # Controller — high mode-archetype fit in Gem Grab (role tests below)
 MODE, MAP = "Brawl Ball", 15000001
-
-# The pre-2026-08-17 weights, kept so a test can show the ranking they used to produce.
-OLD_WEIGHTS = {**DEFAULT_WEIGHTS, "mastery": 0.25, "personal": 0.20}
 
 
 class _Rate:
@@ -77,22 +76,37 @@ def test_strong_meta_beats_maxed_comfort_under_new_weights():
     assert shelly > colt, f"meta pick should win now (shelly={shelly:.3f} colt={colt:.3f})"
 
 
-def test_old_weights_would_have_inverted_it():
-    # The exact scenario above, scored with the old mastery .25 / personal .20 weights: the comfort
-    # pick wins. This is the behavior the de-weight fixes, pinned so a future re-bump is caught.
+def test_mastery_cannot_invert_a_ranking_at_any_value():
+    # The de-weight became a removal: mastery is an investment index, not a win rate, so it no
+    # longer multiplies into the score at all. Sweeping it across its whole range must not flip a
+    # ranking the objective signals already decided. (Pre-2026-08-17 this inverted at mastery .25.)
     stats = _StubStats(map_rates={SHELLY: 0.70, COLT: 0.45},
                        counter_rates={SHELLY: 0.70, COLT: 0.45})
-    roster = {SHELLY: _Mastery(0.0), COLT: _Mastery(1.0)}
-    assert _score(COLT, stats, roster, OLD_WEIGHTS) > _score(SHELLY, stats, roster, OLD_WEIGHTS)
+    for colt_mastery in (0.0, 0.25, 0.5, 0.75, 1.0):
+        roster = {SHELLY: _Mastery(0.0), COLT: _Mastery(colt_mastery)}
+        shelly = _score(SHELLY, stats, roster, DEFAULT_WEIGHTS)
+        colt = _score(COLT, stats, roster, DEFAULT_WEIGHTS)
+        assert shelly > colt, f"mastery {colt_mastery} moved the ranking"
 
 
-def test_mastery_still_breaks_ties():
-    # De-weighted, not removed: with the objective signals equal, the higher-mastery brawler
-    # still edges ahead, so personalization is a nudge rather than gone.
+def test_mastery_does_not_break_ties():
+    # The inverse of the old guard, and deliberately strict: equal objective signals must produce
+    # BIT-IDENTICAL scores however differently the two brawlers are built. A tie-break here would
+    # mean mastery is still leaking into the number.
     stats = _StubStats(map_rates={SHELLY: 0.55, COLT: 0.55},
                        counter_rates={SHELLY: 0.55, COLT: 0.55})
     roster = {SHELLY: _Mastery(0.8), COLT: _Mastery(0.2)}
-    assert _score(SHELLY, stats, roster, DEFAULT_WEIGHTS) > _score(COLT, stats, roster, DEFAULT_WEIGHTS)
+    assert _score(SHELLY, stats, roster, DEFAULT_WEIGHTS) == _score(COLT, stats, roster, DEFAULT_WEIGHTS)
+
+
+def test_roster_presence_alone_does_not_move_the_score():
+    # Loading a roster changes WHICH brawlers are candidates, never what a candidate scores. This is
+    # what makes the meta and roster columns comparable — before this phase the personalized read
+    # renormalized over a different denominator and printed a higher number for the same board.
+    stats = _StubStats(map_rates={SHELLY: 0.62}, counter_rates={SHELLY: 0.58})
+    without = _score(SHELLY, stats, None, DEFAULT_WEIGHTS)
+    with_roster = _score(SHELLY, stats, {SHELLY: _Mastery(1.0)}, DEFAULT_WEIGHTS)
+    assert without == with_roster
 
 
 # --- B1: what the mastery metric actually is, and its default -----------------------------------
@@ -118,15 +132,19 @@ def test_mastery_is_zero_to_one_and_maxes_at_100_percent():
 
 
 def test_unowned_brawler_carries_no_mastery_signal_never_half():
-    # A candidate absent from the roster: owned=False, mastery=None, and no "mastery" term enters
-    # the fused breakdown. The one on the roster carries its real 0..1 score. Nothing is 0.5.
+    # A candidate absent from the roster: owned=False, mastery=None. The one on the roster carries
+    # its real 0..1 score for display. Nothing is ever defaulted to 0.5.
+    # `breakdown` now holds objective parts ONLY — every value in it is a win-rate-shaped [0,1]
+    # quantity, which is precisely why mastery no longer belongs there.
     stats = _StubStats(map_rates={SHELLY: 0.6, COLT: 0.6}, counter_rates={})
     roster = {SHELLY: _Mastery(0.8)}                    # COLT deliberately unowned
     state = DraftState(map_id=MAP, mode=MODE)
     shelly = score_candidate(state, SHELLY, stats, model=None, weights=DEFAULT_WEIGHTS, roster=roster)
     colt = score_candidate(state, COLT, stats, model=None, weights=DEFAULT_WEIGHTS, roster=roster)
-    assert shelly.owned is True and shelly.mastery == 0.8 and "mastery" in shelly.breakdown
-    assert colt.owned is False and colt.mastery is None and "mastery" not in colt.breakdown
+    assert shelly.owned is True and shelly.mastery == 0.8
+    assert colt.owned is False and colt.mastery is None
+    assert "mastery" not in shelly.breakdown and "mastery" not in colt.breakdown
+    assert set(shelly.breakdown) <= set(DEFAULT_WEIGHTS)
 
 
 # --- B2: teammate bans adjust the pool, symmetrically with enemy bans ----------------------------

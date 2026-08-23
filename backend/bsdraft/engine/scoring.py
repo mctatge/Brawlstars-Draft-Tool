@@ -14,6 +14,14 @@ from typing import Dict, List, Optional
 
 from bsdraft.constants import TEAM_SIZE
 from bsdraft.data import reference as R
+from bsdraft.engine.readiness import (
+    HISTORY_CAP,
+    ITEM_EDGE_CAP,
+    Reason as RReason,
+    clamp_score,
+    item_edge,
+    readiness,
+)
 from bsdraft.engine.state import DraftState
 
 # How much each mode rewards each class (heuristic, tunable). Absent classes default to 0.5.
@@ -37,17 +45,20 @@ DEFAULT_PREF = 0.5
 # AUC of the linear refit ceiling). Per-map/mode weighting was re-tested and is still no
 # better than these global weights, so they stay fixed.
 #
-# mastery/personal are NOT part of that ablation — it tunes only the objective signals
-# (map/model/counter/synergy/role; see docs/model-evaluation.md). They personalize the
-# roster seat, and only apply when a roster is loaded. Cut 2026-08-17 (mastery .25 -> .10,
-# personal .20 -> .08): at the old values these two "how good is THIS player on it" signals
-# were ~31% of a personalized pick's score (~37% before any enemy is drafted) — out-driving
-# the model and outweighing `counter`, so the board over-recommended brawlers the player had
-# already mastered and buried meta picks they could grow into. Now a nudge, not a driver
-# (~15% combined). Product knobs (no accuracy claim); tune freely — a per-seat meta / my-roster
-# toggle is the planned next step.
-DEFAULT_WEIGHTS = {"map": 0.25, "model": 0.40, "counter": 0.20, "synergy": 0.05, "role": 0.10,
-                   "mastery": 0.10, "personal": 0.08}
+# These five are the whole blend. Personalization used to ride in here too — `mastery` at .10 and
+# `personal` at .08 — and that was a units bug, not a tuning problem. Every term above is a
+# win-rate-shaped quantity living near .53, while `mastery` was a 0..1 *investment index* that
+# reads ~1.0 for a maxed brawler; injecting it at weight .10 asserted that owning a star power was
+# worth a 60-point win-rate swing. It also made the two blind-pick columns incomparable, since the
+# personalized one renormalized over a different denominator (.85 vs .75 on a first pick), so the
+# same brawler printed a higher number on the roster side purely because the player had built it.
+#
+# Personalization now applies *after* the blend, as signed adjustments in win-rate points — see
+# :mod:`bsdraft.engine.readiness` and `score_candidate` below. That keeps the ablation-tuned
+# weights answering exactly the question they were tuned on, and makes every personal correction
+# separately visible, capped, and labelled with its provenance instead of being smeared into one
+# renormalized average.
+DEFAULT_WEIGHTS = {"map": 0.25, "model": 0.40, "counter": 0.20, "synergy": 0.05, "role": 0.10}
 
 
 @dataclass
@@ -62,11 +73,23 @@ class PickScore:
     role_fit: float
     win_prob: Optional[float]
     confidence: float
+    # The objective blend, before any personalization. Identical for the same board in both
+    # blind-pick columns, which is what makes their percentages comparable at all.
+    base_score: float = 0.0
+    # Signed adjustments applied to `base_score` to reach `score`, in win-rate points.
+    readiness: float = 0.0             # >= 0, SUBTRACTED (power / loadout distance from the meta copy)
+    readiness_reasons: List["RReason"] = field(default_factory=list)
+    item_edge: float = 0.0             # signed; inert until the item table exists
+    history_edge: float = 0.0          # signed; the player's own record, net of their overall skill
+    # Display-only from here down. `mastery` is no longer a scored signal — it stays on the wire so
+    # the roster UI can keep showing an investment badge, but nothing multiplies it any more.
     mastery: Optional[float] = None
     personal_winrate: Optional[float] = None  # this player's own win rate w/ the brawler
     personal_games: Optional[float] = None     # their effective sample (recency-weighted)
     owned: bool = True
     gaps: List[str] = field(default_factory=list)
+    # Objective parts only — every value here is a win-rate-shaped [0,1] quantity. The signed
+    # adjustments deliberately stay OUT of it: mixing units in one dict is the bug this phase fixes.
     breakdown: Dict[str, float] = field(default_factory=dict)
 
 
@@ -209,26 +232,32 @@ def score_candidate(state: DraftState, candidate: int, stats, model=None, weight
     mastery_val: Optional[float] = None
     owned = True
     gaps: List[str] = []
+    fielded = None
     if roster is not None:
         m = roster.get(candidate)
         owned = m is not None
         if m is not None:
             mastery_val = m.score
             gaps = m.gaps()
+            # Duck-typed: the roster dict holds three different mastery-likes depending on host
+            # and source (_ReqMastery, engine.mastery.Mastery, _BoostedMastery), plus test stubs.
+            # A missing .fielded() means "no readiness view" — never a maximal penalty.
+            fn = getattr(m, "fielded", None)
+            fielded = fn() if callable(fn) else None
 
-    # The player's own win rate with this brawler (on this map when they've played it there).
-    # Only counts once they've actually played it; its weight scales with confidence, so a
-    # thin personal sample nudges gently and a deep one speaks up.
+    # The player's own record with this brawler (on this map when they've played it there).
     personal_wr: Optional[float] = None
     personal_games: Optional[float] = None
-    personal_weight = 0.0
+    personal_conf = 0.0
+    pr = None
     if personal is not None:
         pr = personal.brawler_rate(candidate, state.map_id)
         if pr.games > 0:
             personal_wr = pr.winrate
             personal_games = pr.games
-            personal_weight = weights.get("personal", 0.0) * pr.confidence
+            personal_conf = pr.confidence
 
+    # --- the objective blend -------------------------------------------------------------
     # `parts["role"]` carries the confidence-scaled `role_eff` (what actually moves the score and
     # shows in `breakdown`); the raw `role_fit` field below keeps the un-scaled archetype value.
     parts: Dict[str, tuple] = {"map": (map_rate.winrate, weights["map"]), "role": (role_eff, weights["role"])}
@@ -238,13 +267,35 @@ def score_candidate(state: DraftState, candidate: int, stats, model=None, weight
         parts["counter"] = (counter, weights["counter"])
     if win_prob is not None:
         parts["model"] = (win_prob, weights["model"])
-    if mastery_val is not None:
-        parts["mastery"] = (mastery_val, weights["mastery"])
-    if personal_wr is not None and personal_weight > 0:
-        parts["personal"] = (personal_wr, personal_weight)
 
     wsum = sum(w for _, w in parts.values())
-    score = sum(v * w for v, w in parts.values()) / wsum
+    base = sum(v * w for v, w in parts.values()) / wsum
+
+    # --- personalization, applied after the blend ------------------------------------------
+    # Each correction is a signed win-rate-point delta on `base`, individually capped and (for
+    # readiness) individually explained. Nothing here renormalizes the blend, so the same board
+    # yields the same `base` whether or not a roster is loaded — which is what lets the meta and
+    # roster columns print comparable percentages.
+    deficit, reasons = readiness(fielded, personal_conf)
+
+    edge = item_edge()
+    item_adj = 0.0 if edge is None else max(-ITEM_EDGE_CAP, min(ITEM_EDGE_CAP, edge))
+
+    # How far this player's own record moves the estimate off the population baseline for this
+    # brawler. `brawler_rate` is already shrunk toward that same baseline, so an unplayed brawler
+    # contributes exactly 0 and a thin record contributes proportionally — no extra gating needed.
+    #
+    # Deliberately NOT netted against the player's overall win rate. That correction is a per-player
+    # constant: it shifts every candidate by the same amount, so it cannot reorder the list, and all
+    # it does to the number is move the level. On a 40%-overall account it silently added ~5.5
+    # points to every row. The player's global rate is a real and useful fact — it belongs in the
+    # column header, stated once (see PersonalStats.overall_rate), not smeared across every pick.
+    history_adj = 0.0
+    if personal is not None and pr is not None and pr.games > 0:
+        own = pr.winrate - personal.baseline_rate(candidate, state.map_id)
+        history_adj = max(-HISTORY_CAP, min(HISTORY_CAP, own))
+
+    score = clamp_score(base - deficit + item_adj + history_adj)
 
     return PickScore(
         brawler_id=candidate,
@@ -257,6 +308,11 @@ def score_candidate(state: DraftState, candidate: int, stats, model=None, weight
         role_fit=rfit,
         win_prob=win_prob,
         confidence=map_rate.confidence,
+        base_score=base,
+        readiness=deficit,
+        readiness_reasons=reasons,
+        item_edge=item_adj,
+        history_edge=history_adj,
         mastery=mastery_val,
         personal_winrate=personal_wr,
         personal_games=personal_games,

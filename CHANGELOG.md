@@ -6,6 +6,41 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-08-21
 
+- **Your personalized picks now price how far your copy is from the maxed brawler.** Every meta
+  number — map win rate, the model's read, synergy, counter — describes a Power 11 brawler on a full
+  loadout, because that is what almost the entire corpus is. Scoring an under-leveled or half-built
+  copy off that table was silent extrapolation. Now the gap is priced and subtracted from your own
+  pick's %: a **measured power-level deficit** (about 4 win-rate points at Power 10, 7.5 at Power 9,
+  from a within-player estimate held behind a placebo gate), plus **estimated deficits** for a
+  missing star power, gadget, or gear slot. The whole deduction is capped, and it fades out as your
+  own record on that brawler grows — a record built on that exact copy already contains the
+  handicap. A missing hypercharge is shown but left unpriced; nothing in the match log can measure
+  it yet. Relatedly, **mastery is no longer blended into the score** — it is a display-only
+  investment bar now, and your personal win rate applies as a small capped nudge rather than a
+  weighted signal, so personalization breaks near-ties without floating a weak brawler up the board.
+
+- **Arrow keys now steer the brawler grid from wherever you are.** The grid keeps a live cursor, and
+  an arrow pressed outside it moves that cursor by the same step it would from inside — so from a
+  fresh board `→` lands on the second brawler and `↓` on the row below, instead of spending a press
+  to arrive on the first tile. Previously the keys did nothing until focus had been walked into the
+  grid. Typing still owns the caret: with text in the command box, `←`/`→` move through it as before.
+
+- **The post-draft game plan now shows the data, not just the advice.** It used to be a pure
+  class-lookup: your three roles, the enemy's three class tips, and mode do's and don'ts. Those
+  stay, but the panel now also reads from the same collected matches and win-prob model that rank
+  the pick board. A **head-to-head grid** puts your three brawlers against each of theirs, colored
+  by verdict, with your comp's average against each enemy — plus three callouts: the matchup to
+  lean on, the one at risk, and the enemy your comp does worst against overall. Below it, **form on
+  this map** (which of your picks actually performs here, who to play through, who is the weak
+  link) and **your pairs** (which two want to play together). At the top, the model's **win
+  probability for the finished draft**, and a **style-clash** line reading your comp's shape
+  against theirs. Each measured number is shown with the effective sample behind it, and a cell too
+  thin to say anything is left out rather than shown at low confidence — the "lean on" and "risk"
+  callouts additionally have to clear a two-sigma bar, so a small sample can't take a headline on
+  noise. Those two are also split at even, so "lean on" always names a matchup you actually win and
+  "risk" one you actually lose. The rule-based half and the measured half are now grouped under
+  their own headings, each labelled, so the two never blur.
+
 - **New page: the model dossier.** `/model` is a technical write-up of the machine learning behind
   the board — the antisymmetric logit and the recency-weighted loss set in real LaTeX, nine
   hand-drawn architecture diagrams (the strength path, the counter cross, the mask rows, the two

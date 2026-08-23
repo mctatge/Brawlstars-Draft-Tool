@@ -135,6 +135,16 @@ function pickSignals(r: PickRec): { k: string; v: number }[] {
   if (r.personal_winrate != null) s.push({ k: "YOU", v: r.personal_winrate });
   return s;
 }
+// Loadout gaps ("no star power") abbreviated for the half-width columns, which can't fit the full
+// string. The row tooltip keeps the long form, plus the caveat that the score doesn't dock for them.
+const GAP_SHORT: Record<string, string> = {
+  "no star power": "SP",
+  "no gadget": "GDG",
+  "no hypercharge": "HC",
+};
+function gapTags(gaps: string[] | undefined): string[] {
+  return (gaps || []).map((g) => GAP_SHORT[g] || g.replace(/^no /, "").toUpperCase());
+}
 
 // eased number that animates toward `target` — a readout "locking in"
 function useCountUp(target: number, duration = 420) {
@@ -985,14 +995,17 @@ export default function DraftBoard() {
   );
 
   // ---- brawler-grid keyboard navigation (roving tabindex) ----
-  // Arrow keys move a single focus around the grid; Enter/Space on the focused tile places it (native
-  // <button> behavior — no extra handler). ArrowDown from the search box drops into the grid; ArrowUp
-  // off the top row returns to it. A disabled tile (used / can't-field / draft done) isn't focusable,
-  // so nav skips over it and always lands on a placeable brawler.
+  // The grid keeps a live cursor — the roving tab stop — that outlives leaving the grid. Arrow keys
+  // move it; Enter/Space on the focused tile places it (native <button> behavior — no extra handler).
+  // An arrow pressed *outside* the grid moves that same cursor by the same step, so with it resting on
+  // the first tile ArrowRight lands on the second brawler rather than onto the first: entering the
+  // grid costs no extra press. ArrowUp off the top row returns to the search box. A disabled tile
+  // (used / can't-field / draft done) isn't focusable, so nav skips over it and always lands on a
+  // placeable brawler.
   const tileDisabled = (b: Brawler) =>
     used.has(b.id) || (myTurn && !fieldableSet.has(b.id) && !boostedSet.has(b.id)) || step.kind === "done";
-  // Columns come from the live layout (grid-cols-6 on mobile, 8 from `sm`), so ArrowUp/Down move a
-  // true row regardless of breakpoint.
+  // Columns come from the live layout — the track list is auto-fill, so the count follows the panel's
+  // width — which keeps ArrowUp/Down moving a true row at every width.
   const gridCols = () => {
     const el = gridRef.current;
     if (!el) return 6;
@@ -1004,10 +1017,56 @@ export default function DraftBoard() {
       if (!tileDisabled(filtered[i])) return i;
     return -1;
   };
+  // one arrow-key step of the cursor from tile `from`; −1 when nothing placeable lies that way
+  const stepTile = (from: number, key: string) => {
+    const c = gridCols();
+    if (key === "ArrowRight") return seekTile(from + 1, 1);
+    if (key === "ArrowLeft") return seekTile(from - 1, -1);
+    if (key === "ArrowDown") return seekTile(from + c, 1);
+    if (key === "ArrowUp") return seekTile(from - c, -1);
+    return -1;
+  };
   const focusTile = (i: number) => {
     (gridRef.current?.querySelector(`[data-tile="${i}"]`) as HTMLElement | null)?.focus();
     setGridFocus(i);
   };
+  // A new query is a new list, so the cursor returns to its origin — the first tile. Otherwise a
+  // cursor left deep in the full list would clamp to the tail of a short result set, and arrow entry
+  // would start from the last match instead of the first.
+  useEffect(() => { setGridFocus(0); }, [query]);
+
+  // Enter the grid from outside it by *moving* the cursor, exactly as the same key would from inside:
+  // one press gets you where a press from the cursor's tile would, with no wasted press landing on it.
+  // The fallback covers the steps that have nowhere to go — the edge of the grid, or a filtered list
+  // too short for a full row — by entering on the cursor's own tile, so an arrow always gets you in.
+  // False means neither worked (draft done, every tile used/unfieldable): leave the key to the browser.
+  const enterGrid = (key: string) => {
+    const from = Math.max(0, Math.min(gridFocus, filtered.length - 1));
+    let t = stepTile(from, key);
+    if (t < 0) t = seekTile(from, 1);
+    if (t < 0) t = seekTile(from, -1);
+    if (t < 0) return false;
+    focusTile(t);
+    return true;
+  };
+
+  // The grid is the page's keyboard surface, so a bare arrow key anywhere outside it jumps straight in
+  // — no Tab hop through the board first. Skipped wherever arrows already mean something: inside the
+  // grid (its own handler navigates), in a <select>, <textarea>, or contenteditable, or in an <input>
+  // — the tag box keeps its caret, and the search box has its own rule (it enters the grid too, but
+  // only when there's no text to move through). Modifier chords pass through to the browser/OS.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.key.startsWith("Arrow") || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || gridRef.current?.contains(el)) return;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable) return;
+      if (enterGrid(e.key)) e.preventDefault(); // only once it's actually moving focus — else arrows still scroll
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [gridFocus, filtered, used, myTurn, fieldableSet, boostedSet, step.kind]);
 
   const rotation = useMemo(
     () => (ref?.maps || []).filter((m) => m.games > 0).sort((a, b) =>
@@ -1234,11 +1293,12 @@ export default function DraftBoard() {
                     e.preventDefault();
                     if (query.trim()) { if (topMatch) place(topMatch.id); }
                     else { const top = topPick || topBan; if (top) place(top.brawler_id); }
-                  } else if (e.key === "ArrowDown") {
-                    // drop into the brawler grid and hand off to arrow-key navigation
-                    e.preventDefault();
-                    const t = seekTile(0, 1);
-                    if (t >= 0) focusTile(t);
+                  } else if (e.key === "ArrowDown" || ((e.key === "ArrowRight" || e.key === "ArrowLeft") && !query)) {
+                    // drop into the brawler grid and hand off to arrow-key navigation. Left/Right only
+                    // while the box is empty — with text in it they're caret keys and must stay that
+                    // way. ArrowUp is left alone: the grid sits below this box, and its top row already
+                    // sends ArrowUp back here, so entering on Up would just ping-pong.
+                    if (enterGrid(e.key)) e.preventDefault();
                   } else if (e.key === "Escape") setQuery("");
                 }}
                 placeholder="TYPE TO PLACE  ·  e.g.  bro ↵"
@@ -1265,14 +1325,11 @@ export default function DraftBoard() {
               onKeyDown={(e) => {
                 const idxAttr = (e.target as HTMLElement).dataset?.tile;
                 if (idxAttr == null) return; // key came from something other than a tile
-                const i = Number(idxAttr), c = gridCols();
+                const i = Number(idxAttr);
                 let target = -1;
-                if (e.key === "ArrowRight") target = seekTile(i + 1, 1);
-                else if (e.key === "ArrowLeft") target = seekTile(i - 1, -1);
-                else if (e.key === "ArrowDown") target = seekTile(i + c, 1);
-                else if (e.key === "ArrowUp") {
-                  target = seekTile(i - c, -1);
-                  if (target < 0) { e.preventDefault(); focusSearch(); return; } // off the top row → back to search
+                if (e.key.startsWith("Arrow")) {
+                  target = stepTile(i, e.key);
+                  if (target < 0 && e.key === "ArrowUp") { e.preventDefault(); focusSearch(); return; } // off the top row → back to search
                 } else if (e.key === "Home") target = seekTile(0, 1);
                 else if (e.key === "End") target = seekTile(filtered.length - 1, -1);
                 else if (e.key === "Escape") { e.preventDefault(); focusSearch(); return; } // back to search
@@ -1525,8 +1582,9 @@ function PickColumns({ general, generalReady, personal, personalError, name, byI
   return (
     <div className="grid grid-cols-2 anim-fade">
       <div className="min-w-0 border-r border-[var(--line)]">
-        <div className="px-2.5 pt-2 pb-1 label cursor-help"
-          title="the strongest picks for anyone at a full loadout — advise your teammates from this side">◆ META</div>
+        <div className="px-2.5 pt-2 label cursor-help"
+          title="the strongest picks for anyone, scored from ranked data that is ~97% Power 11 with a full loadout — advise your teammates from this side">◆ META</div>
+        <div className="px-2.5 pb-1 mono text-[8px] tracking-[0.08em] text-[var(--dim)]">ANYONE · P11 BASELINE</div>
         {generalReady
           ? general.slice(0, COL_PICKS).map((r, i) => (
               <MiniPick key={r.brawler_id} r={r} b={byId.get(r.brawler_id)} top={i === 0}
@@ -1535,10 +1593,11 @@ function PickColumns({ general, generalReady, personal, personalError, name, byI
           : [0, 1, 2, 3].map((i) => <MiniRowSkeleton key={i} />)}
       </div>
       <div className="min-w-0">
-        <div className="px-2.5 pt-2 pb-1 label truncate cursor-help" style={{ color: "var(--gold)" }}
-          title="your best picks — brawlers you can field this bracket, weighted by your mastery and win-rates">
+        <div className="px-2.5 pt-2 label truncate cursor-help" style={{ color: "var(--gold)" }}
+          title="only brawlers you own that clear this bracket's power floor — a different list from META, not a re-ranking of it. The % assumes a Power 11 brawler on a full loadout, so it does not yet dock for power level or a missing hypercharge.">
           ◈ {(name || "YOU").toUpperCase()}
         </div>
+        <div className="px-2.5 pb-1 mono text-[8px] tracking-[0.08em] text-[var(--dim)]">YOUR ROSTER · P11 BASELINE</div>
         {personalError ? (
           <div className="mono text-[10px] px-2.5 py-3 leading-snug" style={{ color: "var(--red)" }}>⚠ {personalError}</div>
         ) : personal == null ? (
@@ -1563,19 +1622,31 @@ function MiniPick({ r, b, top, accent, enterHint, onClick }: {
 }) {
   const sig = pickSignals(r).sort((a, b2) => Math.abs(b2.v - 0.5) - Math.abs(a.v - 0.5))[0];
   const detail = pickSignals(r).map((s) => `${s.k} ${two(s.v)}`).join(" · ");
+  const gaps = gapTags(r.gaps);
+  // The score now prices power/loadout deficits (readiness), so the % already reflects these gaps
+  // (hypercharge excepted — no estimator exists). This compact row doesn't render the reason chips,
+  // so the note still names what the player's copy is missing.
+  const gapNote = gaps.length > 0 ? `\n⊘ ${r.gaps.join(" · ")} — missing from your copy` : "";
   return (
     <button onClick={onClick}
       className="card-rec flex items-center gap-2 w-full text-left px-2 py-1.5 border-t border-[var(--line)]"
       style={cssVars({ "--glow": accent })}
-      title={`${r.name} · ${pct(r.score)} — ${pickReason(r)}\n${detail}`}>
+      title={`${r.name} · ${pct(r.score)} — ${pickReason(r)}\n${detail}${gapNote}`}>
       <Avatar b={b} size={top ? 40 : 30} />
       <div className="flex-1 min-w-0">
         <div className={`font-semibold truncate ${top ? "text-[13px]" : "text-[12px]"}`}>{r.name}</div>
-        {sig && (
-          <span className="mono text-[9px] tabular-nums text-[var(--dim)]">
-            {sig.k} <span style={{ color: sig.v >= 0.5 ? "var(--green)" : "var(--muted)" }}>{two(sig.v)}</span>
-          </span>
-        )}
+        <div className="flex items-baseline gap-1.5 min-w-0">
+          {sig && (
+            <span className="mono text-[9px] tabular-nums text-[var(--dim)] shrink-0">
+              {sig.k} <span style={{ color: sig.v >= 0.5 ? "var(--green)" : "var(--muted)" }}>{two(sig.v)}</span>
+            </span>
+          )}
+          {gaps.length > 0 && (
+            <span className="mono text-[9px] tracking-[0.06em] truncate" style={{ color: "#e8a24a" }}>
+              ⊘ {gaps.join(" ")}
+            </span>
+          )}
+        </div>
       </div>
       <div className="text-right shrink-0">
         <div className={`mono font-bold tabular-nums ${top ? "text-[15px]" : "text-[13px]"}`}
@@ -1660,6 +1731,31 @@ function TopMetaStrip({ picks, byId, used, onPick, disabled }: {
   );
 }
 
+// Verdict colors for a head-to-head / pair rate. `favored` and `unfavored` are the same hues as
+// `strong`/`losing` at lower emphasis — the bands are wide on purpose (see `_edge` in
+// engine/gameplan.py), so the palette shouldn't imply more precision than the samples support.
+const EDGE_COLOR: Record<string, string> = {
+  strong: "var(--green)", favored: "var(--green)", even: "var(--muted)",
+  unfavored: "var(--gold)", losing: "var(--red)", unknown: "var(--dim)",
+};
+const EDGE_DIM: Record<string, number> = { strong: 1, favored: 0.72, even: 1, unfavored: 0.72, losing: 1 };
+
+// Win rates live in a narrow band around 50%, so a 0-100% bar is all fill and no signal. This
+// plots the *deviation* from even on a centered axis instead, saturating at ±`span`.
+function DeltaBar({ v, span = 0.1 }: { v: number; span?: number }) {
+  const d = Math.max(-1, Math.min(1, (v - 0.5) / span));
+  const up = d >= 0;
+  return (
+    <div className="relative h-[5px] w-full" style={{ background: "var(--panel3)" }}>
+      <div className="absolute inset-y-0" style={{ left: "50%", width: 1, background: "var(--line-strong)" }} />
+      <div className="absolute inset-y-0" style={{
+        left: up ? "50%" : `${50 + d * 50}%`, width: `${Math.abs(d) * 50}%`,
+        background: up ? "var(--green)" : "var(--red)",
+      }} />
+    </div>
+  );
+}
+
 function GamePlanPanel({ gp, blind }: { gp: GamePlan; blind?: boolean }) {
   const Section = ({ label, color, mark, items }: { label: string; color: string; mark: string; items: string[] }) =>
     items.length === 0 ? null : (
@@ -1670,17 +1766,60 @@ function GamePlanPanel({ gp, blind }: { gp: GamePlan; blind?: boolean }) {
         </ul>
       </div>
     );
+  // `?? []` throughout: an older API (see GamePlan in lib/api.ts) sends none of these.
+  const h2h = gp.head_to_head;
+  const mapRead = gp.map_read ?? [];
+  const pairs = gp.pairs ?? [];
+  const ourNames = h2h?.grid[0]?.vs.map((c) => c.name) ?? [];
+  const hasData = !!(h2h || mapRead.length > 0 || pairs.length > 0);
+  // Every chip prints the sample behind it — the panel claims its numbers are measured, so a
+  // headline without an n would be the one place that claim isn't kept.
+  const Chip = ({ mark, label, body, n, color }: { mark: string; label: string; body: string; n?: number | null; color: string }) => (
+    <div className="flex items-baseline gap-1.5 px-2 py-1" style={{ background: "var(--panel2)", borderLeft: `2px solid ${color}` }}>
+      <span className="mono text-[9px] tracking-[0.1em]" style={{ color }}>{mark} {label}</span>
+      <span className="mono text-[11px] text-[var(--muted)]">{body}</span>
+      {n != null && <span className="mono text-[10px] text-[var(--dim)]">n≈{Math.round(n)}</span>}
+    </div>
+  );
   return (
     <div className="panel mt-3 p-4 anim-fade">
-      <div className="flex items-center gap-2 mb-3 pb-3 border-b border-[var(--line)]">
+      <div className="flex items-center gap-2 mb-3 pb-3 border-b border-[var(--line)] flex-wrap">
         <span className="label" style={{ color: "var(--accent)" }}>▣ Game plan</span>
         <span className="mono text-[10px] px-2 py-0.5 border border-[var(--line)] text-[var(--muted)] uppercase tracking-wide">{gp.archetype}</span>
+        {gp.enemy && (
+          <>
+            <span className="mono text-[10px] text-[var(--dim)]">vs</span>
+            <span className="mono text-[10px] px-2 py-0.5 border uppercase tracking-wide"
+              style={{ borderColor: "var(--red)66", color: "var(--red)" }}>{gp.enemy.archetype}</span>
+          </>
+        )}
       </div>
-      <div className="p-3 mb-4" style={{ background: "#3b82f610", border: "1px solid #3b82f640" }}>
-        <div className="label mb-1" style={{ color: "var(--blue)" }}>◎ Win condition</div>
-        <div className="text-[13px]">{gp.win_condition}</div>
-        {gp.objective && <div className="mono text-[10px] text-[var(--muted)] mt-1.5 uppercase tracking-wide">OBJECTIVE · {gp.objective}</div>}
+
+      <div className="grid md:grid-cols-2 gap-3 mb-4">
+        <div className="p-3" style={{ background: "#3b82f610", border: "1px solid #3b82f640" }}>
+          <div className="label mb-1" style={{ color: "var(--blue)" }}>◎ Win condition</div>
+          <div className="text-[13px]">{gp.win_condition}</div>
+          {gp.objective && <div className="mono text-[10px] text-[var(--muted)] mt-1.5 uppercase tracking-wide">OBJECTIVE · {gp.objective}</div>}
+        </div>
+        {gp.model_read && (
+          <div className="p-3" style={{ background: "var(--panel2)", border: "1px solid var(--line)" }}>
+            <div className="flex items-baseline justify-between mb-1">
+              <span className="label">◆ Model read on the draft</span>
+              <span className="mono text-[15px]" style={{ color: scoreColor(gp.model_read.win_prob) }}>{pct(gp.model_read.win_prob)}</span>
+            </div>
+            <DeltaBar v={gp.model_read.win_prob} />
+            <div className="text-[12px] mt-1.5">{gp.model_read.verdict}</div>
+            <div className="mono text-[10px] text-[var(--dim)] mt-1 leading-snug">{gp.model_read.note}</div>
+          </div>
+        )}
       </div>
+
+      {gp.enemy?.clash && (
+        <div className="mb-4 pl-2.5 py-1 text-[12px] text-[var(--muted)] leading-snug" style={{ borderLeft: "2px solid var(--line-strong)" }}>
+          <span className="mono text-[10px] tracking-[0.1em] text-[var(--dim)]">STYLE CLASH · </span>{gp.enemy.clash}
+        </div>
+      )}
+
       <div className="grid md:grid-cols-2 gap-x-6 gap-y-4">
         <div>
           <div className="label mb-2">Your roles</div>
@@ -1707,11 +1846,140 @@ function GamePlanPanel({ gp, blind }: { gp: GamePlan; blind?: boolean }) {
           </div>
         </div>
       </div>
-      <div className="grid md:grid-cols-3 gap-x-6 gap-y-4 mt-4 pt-3 border-t border-[var(--line)]">
-        <Section label="Do" color="var(--green)" mark="✓" items={gp.tips} />
-        <Section label="Avoid" color="var(--red)" mark="✕" items={gp.avoid} />
-        <Section label="Compensate" color="var(--gold)" mark="⚠" items={gp.compensate} />
+
+      <div className="mt-4 pt-3 border-t border-[var(--line)]">
+        <div className="label mb-1">◆ Standard mode &amp; role strategy</div>
+        <div className="mono text-[10px] text-[var(--dim)] mb-3 leading-snug">
+          RULE-BASED, NOT LEARNED — THE MATCH DATA IS DRAFT-TO-OUTCOME ONLY, WITH NO POSITIONS OR TIMINGS,
+          SO NOTHING IN IT COULD TEACH A MODEL HOW TO PLAY THE MODE. THE ROLES AND THREAT TIPS ABOVE ARE THIS HALF TOO.
+        </div>
+        <div className="grid md:grid-cols-3 gap-x-6 gap-y-4">
+          <Section label="Do" color="var(--green)" mark="✓" items={gp.tips} />
+          <Section label="Avoid" color="var(--red)" mark="✕" items={gp.avoid} />
+          <Section label="Compensate" color="var(--gold)" mark="⚠" items={gp.compensate} />
+        </div>
       </div>
+      {hasData && (
+        <div className="mt-4 pt-3 border-t border-[var(--line)]">
+          <div className="label mb-1" style={{ color: "var(--gold)" }}>◆ From the collected matches</div>
+          <div className="mono text-[10px] text-[var(--dim)] mb-3 leading-snug">
+            EVERYTHING BELOW IS MEASURED, NOT ADVICE — SAME MATCH DATA THAT RANKS THE PICK BOARD. N = EFFECTIVE
+            SAMPLE AFTER RECENCY WEIGHTING; THIN CELLS ARE LEFT BLANK RATHER THAN SHOWN AT LOW CONFIDENCE.
+          </div>
+
+          {h2h && (
+            <div className="mb-4">
+              <div className="label mb-1.5">Head-to-head</div>
+              <div className="overflow-x-auto">
+                <table className="border-collapse min-w-full">
+                  <thead>
+                    <tr>
+                      <th className="mono text-[9px] tracking-[0.1em] text-[var(--dim)] font-normal text-left pb-1.5 pr-3">THEIR PICK</th>
+                      {ourNames.map((n) => (
+                        <th key={n} className="mono text-[10px] font-normal text-right pb-1.5 px-2 whitespace-nowrap" style={{ color: "var(--blue)" }}>{n}</th>
+                      ))}
+                      <th className="mono text-[9px] tracking-[0.1em] text-[var(--dim)] font-normal text-right pb-1.5 pl-3 whitespace-nowrap">AVG</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {h2h.grid.map((row) => (
+                      <tr key={row.enemy} className="border-t border-[var(--line)]">
+                        <td className="py-1.5 pr-3 whitespace-nowrap">
+                          <span className="text-[12px] font-semibold" style={{ color: CLASS_COLOR[row.enemy_cls] || "#aaa" }}>{row.enemy}</span>
+                          <span className="mono text-[9px] tracking-[0.08em] ml-1.5" style={{ color: CLASS_COLOR[row.enemy_cls] || "#aaa", opacity: 0.7 }}>{CLASS_SHORT[row.enemy_cls] || row.enemy_cls}</span>
+                        </td>
+                        {row.vs.map((c, i) => (
+                          <td key={i} className="py-1.5 px-2 text-right mono text-[12px] tabular-nums"
+                            style={{ color: EDGE_COLOR[c.edge] || "var(--muted)", opacity: EDGE_DIM[c.edge] ?? 1 }}
+                            title={c.winrate == null ? "too thin a sample with both on the board"
+                              : `n≈${Math.round(c.games)} effective (recency-weighted) sample`}>
+                            {c.winrate == null ? "·" : pct(c.winrate)}
+                          </td>
+                        ))}
+                        <td className="py-1.5 pl-3 text-right mono text-[12px] tabular-nums text-[var(--muted)] whitespace-nowrap"
+                          title={row.mean == null ? "no cell in this row cleared the sample floor"
+                            : `mean of ${row.mean_cells ?? 0} of ${row.vs.length} cells · n≈${Math.round(row.mean_games ?? 0)}`}>
+                          {row.mean == null ? "·" : pct(row.mean)}
+                          {row.mean != null && (
+                            <span className="text-[var(--dim)] text-[10px]"> /{row.mean_cells ?? 0}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mono text-[10px] text-[var(--dim)] mt-1.5 leading-snug">
+                YOUR SIDE&apos;S WIN RATE IN MATCHES WITH BOTH BRAWLERS ON THE BOARD — A TEAM RESULT, NOT A 1V1 DUEL.
+              </div>
+              <div className="flex flex-wrap gap-2 mt-2">
+                {h2h.best?.winrate != null && (
+                  <Chip mark="▲" label="LEAN ON" color="var(--green)" n={h2h.best.games}
+                    body={`${h2h.best.ours} into ${h2h.best.theirs} · ${pct(h2h.best.winrate)}`} />
+                )}
+                {h2h.danger?.winrate != null && (
+                  <Chip mark="▼" label="RISK" color="var(--red)" n={h2h.danger.games}
+                    body={`${h2h.danger.ours} into ${h2h.danger.theirs} · ${pct(h2h.danger.winrate)}`} />
+                )}
+                {h2h.focus?.winrate != null && (
+                  <Chip mark="◎" label="FOCUS" color="var(--gold)" n={h2h.focus.games}
+                    body={`${h2h.focus.enemy} — weakest overall, across ${h2h.focus.cells ?? 0} matchups · ${pct(h2h.focus.winrate)}`} />
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="grid md:grid-cols-2 gap-x-6 gap-y-4">
+            {mapRead.length > 0 && (
+              <div>
+                <div className="label mb-2">Form on this map</div>
+                <div className="space-y-2">
+                  {mapRead.map((m) => (
+                    <div key={m.name}>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <div className="min-w-0">
+                          <span className="text-[12px] font-semibold" style={{ color: CLASS_COLOR[m.cls] || "#aaa" }}>{m.name}</span>
+                          {m.tag !== "solid" && (
+                            <span className="mono text-[9px] tracking-[0.1em] ml-1.5"
+                              style={{ color: m.tag === "anchor" ? "var(--green)" : "var(--gold)" }}>
+                              {m.tag === "anchor" ? "PLAY THROUGH" : "WEAK LINK"}
+                            </span>
+                          )}
+                        </div>
+                        <span className="mono text-[11px] tabular-nums shrink-0" style={{ color: scoreColor(m.winrate) }}>
+                          {pct(m.winrate)} <span className="text-[var(--dim)]">n≈{Math.round(m.games)}</span>
+                        </span>
+                      </div>
+                      <div className="mt-1"><DeltaBar v={m.winrate} /></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {pairs.length > 0 && (
+              <div>
+                <div className="label mb-2">Your pairs</div>
+                <div className="space-y-2">
+                  {pairs.map((p) => (
+                    <div key={`${p.a}-${p.b}`}>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="text-[12px] truncate">{p.a} <span className="text-[var(--dim)]">+</span> {p.b}</span>
+                        <span className="mono text-[11px] tabular-nums shrink-0" style={{ color: scoreColor(p.winrate) }}>
+                          {pct(p.winrate)} <span className="text-[var(--dim)]">n≈{Math.round(p.games)}</span>
+                        </span>
+                      </div>
+                      <div className="mt-1"><DeltaBar v={p.winrate} /></div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mono text-[10px] text-[var(--dim)] mt-2 leading-snug">
+                  WIN RATE WHEN THESE TWO WERE DRAFTED TOGETHER — KEEP THE STRONGEST PAIR PLAYING OFF EACH OTHER.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

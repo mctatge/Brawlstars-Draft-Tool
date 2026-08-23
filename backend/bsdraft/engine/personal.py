@@ -115,6 +115,32 @@ class PersonalStats:
             prior = self.fallback.brawler_rate(brawler_id, map_id).winrate if self.fallback else 0.5
         return _rate(w, g, prior_rate=prior)
 
+    def baseline_rate(self, brawler_id: int, map_id: Optional[int] = None) -> float:
+        """The *population* rate this player's record is measured against — what
+        :meth:`brawler_rate` converges to when they have never played the brawler.
+
+        Exposed so a caller can take a clean ``personal - baseline`` difference. Subtracting some
+        other table's rate instead would conflate the player's edge with the gap between two
+        populations: personal stats fall back to the GLOBAL table while a pick is scored against
+        the rank-BRACKET table, so those two numbers are not the same quantity."""
+        if self.fallback is None:
+            return 0.5
+        return self.fallback.brawler_rate(brawler_id, map_id).winrate
+
+    def overall_rate(self) -> Rate:
+        """This player's win rate across every brawler, smoothed toward 0.5.
+
+        0.5 is the correct anchor rather than a population average: ranked 3v3 is symmetric, so the
+        population wins exactly half its games by construction.
+
+        For DISPLAY — it belongs in a column header, stated once. It deliberately does not enter
+        the pick score: being a per-player constant it shifts every candidate identically, so it
+        cannot reorder a list, and folding it in only moves the level (on a 40%-overall account it
+        added ~5.5 points to every row). See the history-edge block in ``engine/scoring.py``."""
+        wins = sum(self.b_wins.values())
+        games = sum(self.b_games.values())
+        return _rate(wins, games, prior_rate=0.5)
+
 
 def matches_from_battlelog(battles: Iterable[dict], tag: str) -> List[dict]:
     """Normalize a live battle log into Match dicts (ranked 3v3 only), shaped exactly like

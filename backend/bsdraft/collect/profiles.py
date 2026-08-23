@@ -43,9 +43,9 @@ DEFAULT_REVISIT_DAYS = 21.0
 
 def owned_summary(player: dict) -> dict:
     """Compact per-brawler ownership for one player: ``{brawler_id: {sp:[ids], gd:[ids],
-    gr:[[id,level],...]}}``. Reuses :func:`parse_roster` (the same parser the live roster uses)
-    so the owned-item ids stay defined in one place. Brawlers the player owns but has no items on
-    are still included — a zero-count is the inference's baseline, not missing data."""
+    gr:[[id,name,level],...], hc:bool, ht:int}}``. Reuses :func:`parse_roster` (the same parser the
+    live roster uses) so the owned-item ids stay defined in one place. Brawlers the player owns but
+    has no items on are still included — a zero-count is the inference's baseline, not missing data."""
     out: Dict[str, dict] = {}
     for bid, m in parse_roster(player).items():
         out[str(bid)] = {
@@ -55,6 +55,15 @@ def owned_summary(player: dict) -> dict:
             # the build restrict to the six universal gears and the serve path resolve them is learned
             # from these live entries).
             "gr": [[g["id"], g.get("name", ""), g.get("level", 0)] for g in m.owned_gears],
+            # Hypercharge ownership and lifetime trophies. Nothing consumes these yet; they are
+            # recorded because they are only observable *live*. Battle logs carry no hypercharge
+            # field, so a hypercharge contrast can never be reconstructed from the match log
+            # retroactively — every un-profiled day is unrecoverable. Hypercharge is also the
+            # cleanest ownership contrast available (one binary, and investment-matched: players
+            # who own one on brawler X but not Y), which is what the power-deficit estimator in
+            # :mod:`bsdraft.data.readiness_build` cannot measure from matches alone.
+            "hc": bool(m.has_hypercharge),
+            "ht": int(m.highest_trophies or 0),
         }
     return out
 

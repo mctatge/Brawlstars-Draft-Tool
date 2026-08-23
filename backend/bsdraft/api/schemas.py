@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class OwnedGear(BaseModel):
@@ -59,6 +59,24 @@ class RecommendRequest(BaseModel):
     top: int = 8
 
 
+class ReadinessReason(BaseModel):
+    """One line of the readiness deficit, ready to render as a chip.
+
+    ``source`` is the provenance and decides how it should be shown:
+      ``measured``   estimated from the match log behind a placebo gate (docs/readiness.md)
+      ``estimated``  a declared prior, capped so it can never outrank a measurement
+      ``unpriced``   surfaced to the user but worth exactly 0.0 points — no estimator exists
+
+    ``from_attributes`` because /api/recommend builds the response with ``PickRec(**vars(p))``,
+    which hands this field the engine's frozen ``readiness.Reason`` dataclasses rather than dicts.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    label: str
+    points: float          # signed win-rate points; <= 0 for a deficit, exactly 0.0 when unpriced
+    source: str
+
+
 class PickRec(BaseModel):
     brawler_id: int
     name: str
@@ -70,6 +88,18 @@ class PickRec(BaseModel):
     role_fit: float
     win_prob: Optional[float] = None
     confidence: float
+    # The objective blend before personalization. Identical for the same board on both the meta
+    # and roster reads, which is what makes those two percentages comparable.
+    base_score: float = 0.0
+    # Signed adjustments taking base_score -> score, in win-rate points. `readiness` is >= 0 and is
+    # SUBTRACTED; the other two are signed. They are separate fields rather than `breakdown` keys
+    # because breakdown holds win-rate-shaped [0,1] values and these are deltas.
+    readiness: float = 0.0
+    readiness_reasons: List[ReadinessReason] = []
+    item_edge: float = 0.0
+    history_edge: float = 0.0
+    # Display-only. `mastery` is an investment index, no longer a scored signal — kept on the wire
+    # for the roster badge. See engine/mastery.py.
     mastery: Optional[float] = None
     personal_winrate: Optional[float] = None   # this player's own win rate with the brawler
     personal_games: Optional[float] = None      # their effective (recency-weighted) sample
@@ -111,6 +141,74 @@ class ThreatTip(BaseModel):
     tip: str
 
 
+class EnemyRead(BaseModel):
+    archetype: str
+    playstyle: str
+    clash: str = ""
+
+
+class MapForm(BaseModel):
+    """One of our brawlers' win rate on *this map*. `tag` is anchor / solid / weak."""
+    name: str
+    cls: str
+    winrate: float
+    games: float
+    tag: str = "solid"
+
+
+class PairRate(BaseModel):
+    a: str
+    b: str
+    winrate: float
+    games: float
+    edge: str
+
+
+class H2HCell(BaseModel):
+    """One (ours, theirs) cell. `winrate` is None when the cell is too thin to show."""
+    name: str
+    winrate: Optional[float] = None
+    games: float = 0.0
+    edge: str = "unknown"
+
+
+class H2HRow(BaseModel):
+    enemy: str
+    enemy_cls: str
+    vs: List[H2HCell] = []
+    mean: Optional[float] = None      # our comp's average rate against this enemy
+    mean_cells: int = 0               # how many cells survived the floor to form `mean`
+    mean_games: float = 0.0           # their combined effective sample
+
+
+class H2HCallout(BaseModel):
+    ours: Optional[str] = None
+    theirs: Optional[str] = None
+    enemy: Optional[str] = None
+    enemy_cls: Optional[str] = None
+    name: Optional[str] = None
+    winrate: Optional[float] = None
+    games: Optional[float] = None     # effective sample behind the callout
+    cells: Optional[int] = None       # focus only: how many cells its average is over
+    edge: Optional[str] = None
+
+
+class HeadToHead(BaseModel):
+    grid: List[H2HRow] = []
+    # Each callout is optional on its own: `focus` needs a row averaging 2+ surviving cells and
+    # a sub-even average, `best` needs a cell above even and `danger` one below it — so a grid
+    # with nothing to say on an axis simply omits that chip rather than inventing one.
+    focus: Optional[H2HCallout] = None    # enemy our comp does worst against overall
+    danger: Optional[H2HCallout] = None   # our worst *losing* cell
+    best: Optional[H2HCallout] = None     # our best *winning* cell
+
+
+class ModelRead(BaseModel):
+    win_prob: float
+    verdict: str
+    note: str = ""
+
+
 class GamePlan(BaseModel):
     objective: str = ""
     win_condition: str = ""
@@ -121,6 +219,13 @@ class GamePlan(BaseModel):
     tips: List[str] = []
     avoid: List[str] = []
     compensate: List[str] = []
+    # Data-backed half — each independently empty/None when its cells are too thin, or when the
+    # engine has no stats/model to read from. See engine/gameplan.py.
+    enemy: Optional[EnemyRead] = None
+    map_read: List[MapForm] = []
+    pairs: List[PairRate] = []
+    head_to_head: Optional[HeadToHead] = None
+    model_read: Optional[ModelRead] = None
 
 
 class RecommendResponse(BaseModel):
@@ -187,12 +292,26 @@ class ReferenceResponse(BaseModel):
     boosted: List[int] = []      # ids of this season's free/"boosted" Ranked brawlers
 
 
+ROSTER_SCHEMA = 2
+"""Monotonic version of the per-brawler roster shape.
+
+1 — the original: id / mastery / gaps / owned items / power / has_hypercharge.
+2 — the same fields, but ``mastery`` is display-only and scoring reads power + gaps + gear count
+    to price readiness (see :mod:`bsdraft.engine.readiness`).
+
+It exists because /api/roster and /api/recommend are served by *different hosts* that deploy
+independently — the roster comes from the keyed tunnel on the home machine, recommend from Render.
+A ``mastery`` float that means two different things across that boundary produces no schema
+mismatch, no 4xx and no log line, so the version is the only way to notice. Absent means 1."""
+
+
 class RosterResponse(BaseModel):
     loaded: bool
     tag: str
     name: str
     owned: List[OwnedBrawler] = []
     error: Optional[str] = None
+    roster_schema: int = ROSTER_SCHEMA
 
 
 class LoadoutItem(BaseModel):

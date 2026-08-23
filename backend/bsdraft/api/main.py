@@ -32,6 +32,7 @@ from bsdraft.engine.engine import DraftEngine
 from bsdraft.engine.loadout import loadout_advice
 from bsdraft.engine import purchases as purchases_mod
 from bsdraft.engine.personal import build_personal_stats, matches_from_battlelog
+from bsdraft.engine.readiness import Fielded
 from bsdraft.engine.state import DraftState
 from bsdraft.engine.playerrank import build_rank_index, current_ranked_tier
 from bsdraft.engine.rank_store import RankIndex, load_rank_index
@@ -523,30 +524,48 @@ def top_picks(req: S.TopPicksRequest):
 
 
 class _ReqMastery:
-    """Lite stand-in for :class:`engine.mastery.Mastery` built from a client-sent roster entry —
-    exposes just the ``.score`` and ``.gaps()`` that scoring reads. Lets the public backend
-    personalize from a roster the client fetched (via the keyed tunnel) but the backend can't."""
-    __slots__ = ("score", "_gaps")
+    """Lite stand-in for :class:`engine.mastery.Mastery` built from a client-sent roster entry.
 
-    def __init__(self, score: float, gaps: List[str]):
+    Exposes the ``.score`` the roster UI displays, the ``.gaps()`` it shows as chips, and the
+    ``.fielded()`` readiness view the scorer prices. Lets the public backend personalize from a
+    roster the client fetched (via the keyed tunnel) but the backend itself can't reach.
+
+    Power and the gear count are kept, not just the gate's verdict on them: the floor decides
+    whether a brawler is *selectable*, while readiness prices how far the selectable copy is from
+    the maxed one the meta table describes. Both read the same wire field."""
+    __slots__ = ("score", "_gaps", "_power", "_n_gears")
+
+    def __init__(self, score: float, gaps: List[str], power: int = 0, n_gears: int = 0):
         self.score = max(0.0, min(1.0, float(score)))
         self._gaps = list(gaps or [])
+        self._power = int(power or 0)
+        self._n_gears = int(n_gears or 0)
 
     def gaps(self) -> List[str]:
         return self._gaps
 
+    def fielded(self) -> Fielded:
+        return Fielded.from_gaps(self._power, self._gaps, self._n_gears)
+
 
 class _BoostedMastery:
-    """Mastery stand-in for a season's free/"boosted" brawler the player doesn't own. Ranked hands
-    it out fully maxed (all star powers / gadgets / gears / hypercharge) but the player has no
-    history on it, so it scores as full *build* and zero *comfort* — mirroring
-    :attr:`engine.mastery.Mastery.score` (``0.60*build + 0.40*comfort``) at ``build=1``, comfort
-    0. No loadout gaps, since it's maxed."""
+    """Mastery stand-in for a season's free/"boosted" brawler the player doesn't own.
+
+    Ranked hands these out fully maxed — Power 11, every star power / gadget / gear / hypercharge —
+    so ``.fielded()`` is fully ready and the brawler takes **no** readiness deficit. That is the
+    whole point: a free maxed brawler is exactly the copy the meta win rate describes.
+
+    ``.score`` stays 0.60 (full *build*, zero *comfort*) because it is a display-only investment
+    index and the player genuinely has no history here. It no longer touches the pick score, so the
+    old worry — that this constant quietly depressed free maxed brawlers — is gone with the term."""
     __slots__ = ()
     score = 0.60
 
     def gaps(self) -> List[str]:
         return []
+
+    def fielded(self) -> Fielded:
+        return Fielded.ready()
 
 
 def _roster_for(req: S.RecommendRequest):
@@ -573,7 +592,8 @@ def _roster_for(req: S.RecommendRequest):
     floor = min_power_for_bracket(req.rank_bracket)
     fieldable = lambda power: power == 0 or power >= floor
     if req.roster is not None:
-        roster = {e.id: _ReqMastery(e.mastery, e.gaps) for e in req.roster if fieldable(e.power)}
+        roster = {e.id: _ReqMastery(e.mastery, e.gaps, e.power, len(e.owned_gears or ()))
+                  for e in req.roster if fieldable(e.power)}
     elif _engine.roster:
         roster = {bid: m for bid, m in _engine.roster.items() if fieldable(m.power)}
     else:
