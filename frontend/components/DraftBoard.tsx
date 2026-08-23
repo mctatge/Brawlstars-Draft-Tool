@@ -136,7 +136,7 @@ function pickSignals(r: PickRec): { k: string; v: number }[] {
   return s;
 }
 // Loadout gaps ("no star power") abbreviated for the half-width columns, which can't fit the full
-// string. The row tooltip keeps the long form, plus the caveat that the score doesn't dock for them.
+// string. The row tooltip keeps the long form; the score now docks for them via the readiness deficit.
 const GAP_SHORT: Record<string, string> = {
   "no star power": "SP",
   "no gadget": "GDG",
