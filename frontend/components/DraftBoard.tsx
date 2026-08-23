@@ -1293,11 +1293,18 @@ export default function DraftBoard() {
                     e.preventDefault();
                     if (query.trim()) { if (topMatch) place(topMatch.id); }
                     else { const top = topPick || topBan; if (top) place(top.brawler_id); }
-                  } else if (e.key === "ArrowDown" || ((e.key === "ArrowRight" || e.key === "ArrowLeft") && !query)) {
-                    // drop into the brawler grid and hand off to arrow-key navigation. Left/Right only
-                    // while the box is empty — with text in it they're caret keys and must stay that
-                    // way. ArrowUp is left alone: the grid sits below this box, and its top row already
-                    // sends ArrowUp back here, so entering on Up would just ping-pong.
+                  } else if (
+                    e.key === "ArrowDown" ||
+                    // Left/Right drop into the grid only when the caret has nothing left to move
+                    // through in that direction — Right at the end of the text, Left at the start —
+                    // so mid-text they stay caret keys for editing, but "type a name then arrow to
+                    // the match you want" works without first emptying the box. An empty box has the
+                    // caret at both edges, so it still enters on either. ArrowUp is left alone: the
+                    // grid sits below this box and its top row already sends ArrowUp back here, so
+                    // entering on Up would just ping-pong.
+                    (e.key === "ArrowRight" && e.currentTarget.selectionStart === query.length && e.currentTarget.selectionEnd === query.length) ||
+                    (e.key === "ArrowLeft" && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0)
+                  ) {
                     if (enterGrid(e.key)) e.preventDefault();
                   } else if (e.key === "Escape") setQuery("");
                 }}
