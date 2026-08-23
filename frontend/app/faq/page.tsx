@@ -38,6 +38,26 @@ const content: Content = {
   ],
 };
 
+// FAQPage structured data, generated from the same Q&A the page renders so the two never drift.
+// Answers are flattened to plain text (paragraph breaks -> spaces); JSON-LD answers take text.
+const faqJsonLd = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: content.sections.map((s) => ({
+    "@type": "Question",
+    name: s.heading,
+    acceptedAnswer: { "@type": "Answer", text: s.body.replace(/\s+/g, " ").trim() },
+  })),
+};
+
 export default function Page() {
-  return <ContentPage content={content} current="/faq" />;
+  return (
+    <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(faqJsonLd) }}
+      />
+      <ContentPage content={content} current="/faq" />
+    </>
+  );
 }

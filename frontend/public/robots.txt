@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://brawldraft.com/sitemap.xml
