@@ -4,6 +4,14 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-08-23
+
+- **The Heist map "Safe(r) Zone" is back in the pool.** It's live in the ranked rotation, but the
+  upstream Brawlify/BrawlAPI catalog still flags it disabled, so it was being filtered out entirely.
+  A small force-enable override now keeps it in the ranked pool (and survives the next catalog
+  refresh); it surfaces on the site once the crawler has collected enough Heist games on it. Until
+  the next retrain the model reads it as a generic Heist map.
+
 ## 2026-08-21
 
 - **Your personalized picks now price how far your copy is from the maxed brawler.** Every meta

@@ -28,6 +28,15 @@ CLASS_OVERRIDES_PATH = Path(__file__).resolve().parent / "class_overrides.json"
 RANKED_BOOSTED_PATH = REFERENCE_DIR / "ranked_boosted.json"
 ECONOMY_PATH = REFERENCE_DIR / "economy.json"
 
+# Maps that are live in the ranked rotation but whose upstream Brawlify/BrawlAPI ``disabled``
+# flag lags behind it (the events feed tracks casual rotation and can miss a ranked-only pool).
+# Force-enabling here — rather than editing ``maps.json`` — keeps the fix from being clobbered
+# the next time ``scripts/refresh_reference.py`` rewrites the snapshot from upstream. The map
+# still only surfaces on the site once the crawler has accumulated its share of games for the
+# mode (see the reference endpoint), so this just lets it back into the pool to be collected.
+#   15000886  Safe(r) Zone (Heist) — confirmed live 2026-08-23; upstream still flags disabled.
+RANKED_MAP_ENABLE_OVERRIDES = frozenset({15000886})
+
 
 @dataclass(frozen=True)
 class Accessory:
@@ -131,7 +140,7 @@ def load_ranked_maps() -> tuple:
     raw = _load_json(REFERENCE_DIR / "maps.json")["list"]
     maps = []
     for x in raw:
-        if x.get("disabled"):
+        if x.get("disabled") and x.get("id") not in RANKED_MAP_ENABLE_OVERRIDES:
             continue
         mode = (x.get("gameMode") or {}).get("name")
         if mode not in RANKED_MODES:
