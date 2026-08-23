@@ -53,6 +53,8 @@ _personal_cache: dict = {} # tag -> (data_version, PersonalStats|None); rebuilt 
 _personal_locks: dict = {} # tag -> Lock; single-flights the per-tag dataset scan (no stampede)
 _personal_locks_guard = threading.Lock()
 _roster_cache: dict = {}   # normalized tag -> (fetched_at, RosterResponse); short TTL spares the live API
+_ROSTER_CACHE_MAX = 256    # hard bound so distinct tags can't grow the cache without limit
+
 # Share of its mode's busiest map that a map must reach to count as "in the current rotation".
 # The observed gap between a live map and a retired one is ~20x, so anything from ~0.1 to ~0.5
 # separates them; 0.15 leans toward keeping a map that is merely quiet.
@@ -386,9 +388,17 @@ async def roster(tag: Optional[str] = None):
             for bid, m in r.items()
         ]
         resp = S.RosterResponse(loaded=True, tag=t, name=name, owned=owned)
-        if len(_roster_cache) > 512:   # bound growth — one entry per unique tag, TTL alone never frees it
-            _roster_cache.clear()
-        _roster_cache[key] = (time.time(), resp)  # cache only successful loads; errors retry next poll
+        # Cache only successful loads; errors retry next poll. Evict stale/oldest entries so a
+        # stream of distinct tags can't grow this unbounded over the process lifetime (the TTL
+        # alone never removes anything — it's only checked on read).
+        now = time.time()
+        if len(_roster_cache) >= _ROSTER_CACHE_MAX:
+            for k in [k for k, (ts, _) in _roster_cache.items()
+                      if (now - ts) >= settings.roster_ttl_seconds]:
+                del _roster_cache[k]
+            if len(_roster_cache) >= _ROSTER_CACHE_MAX:  # all still fresh — drop the oldest
+                del _roster_cache[min(_roster_cache, key=lambda k: _roster_cache[k][0])]
+        _roster_cache[key] = (now, resp)
         return resp
     except Exception as e:  # noqa: BLE001
         return S.RosterResponse(loaded=False, tag=t, name="", error=str(e))
