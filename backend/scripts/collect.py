@@ -107,16 +107,30 @@ def _publish_stats() -> None:
 
 
 def _publish_rank_index() -> None:
-    """Build the full tag->Ranked-tier index and publish rank_index.json.gz so the live API LOADS
-    it instead of building a ~200 MB dict from the whole dataset (which threatens the 512 MB free
-    tier). Best-effort — never kills the crawl loop."""
+    """Build the full tag->Ranked-tier index and publish BOTH containers so the live API LOADS it
+    instead of building a ~200 MB dict from the whole dataset (which OOMs the 512 MB free tier).
+
+    Two assets on purpose, for the duration of the format migration: ``rank_index.npz`` is what
+    RANK_INDEX_URL points at (~66 MB peak to load), and the legacy ``rank_index.json.gz`` keeps
+    being refreshed so that reverting RANK_INDEX_URL lands on a *current* artifact instead of a
+    frozen one. The expensive part — the full matches.jsonl scan — runs once and feeds both.
+
+    Each upload is independent: a hiccup writing the new asset must not stop the legacy one the
+    deployed API may still be reading, and vice versa. Best-effort — never kills the crawl loop."""
     try:
         from bsdraft.engine.playerrank import build_rank_index
         from bsdraft.engine.rank_store import save_rank_index
-        save_rank_index(build_rank_index(), publisher.RANK_INDEX_PATH)
-        publisher.publish_rank_index()
+        idx = build_rank_index()
+        save_rank_index(idx, publisher.RANK_INDEX_PATH)
+        save_rank_index(idx, publisher.RANK_INDEX_NPZ_PATH)
     except Exception as e:  # noqa: BLE001 — a rank-index hiccup shouldn't kill a long crawl loop
-        print(f"rank index publish failed: {e}")
+        print(f"rank index build failed: {e}")
+        return
+    for path in (publisher.RANK_INDEX_PATH, publisher.RANK_INDEX_NPZ_PATH):   # legacy first
+        try:
+            publisher.publish_rank_index(path=path)
+        except Exception as e:  # noqa: BLE001 — one asset failing must not block the other
+            print(f"rank index publish failed ({path.name}): {e}")
 
 
 def _check_meta(retrain_on_shift: bool, publish: bool = False) -> None:

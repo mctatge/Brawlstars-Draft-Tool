@@ -6,9 +6,13 @@ tier) as the crawl grows.
     PYTHONPATH=backend python backend/scripts/export_rank_index.py
 
 Run on a machine with the data + RAM to spare (the home crawler box). Publish it with
-``python -m bsdraft.collect.publish --only-rank`` (the crawler does both each cycle). The API
-pulls it via ``RANK_INDEX_URL`` and loads it into a compact NumPy-backed ~20 MB lookup.
-Output: data/processed/rank_index.json.gz.
+``python -m bsdraft.collect.publish --only-rank-npz`` (the crawler does both each cycle). The API
+pulls it via ``RANK_INDEX_URL`` and loads the arrays straight back — measured on the live 3.0M-tag
+index: 13.7 MB asset, ~0.3 s, ~66 MB peak RSS.
+Output: data/processed/rank_index.npz.
+
+The container follows the ``--out`` suffix, so ``--out data/processed/rank_index.json.gz`` still
+writes the legacy gzipped JSON (~263 MB to load — the format this replaced).
 """
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ from bsdraft.constants import PROCESSED_DIR
 from bsdraft.engine.playerrank import build_rank_index
 from bsdraft.engine.rank_store import save_rank_index
 
-DEFAULT_OUT = PROCESSED_DIR / "rank_index.json.gz"
+DEFAULT_OUT = PROCESSED_DIR / "rank_index.npz"
 
 
 def export(out: Path = DEFAULT_OUT) -> Path:
@@ -35,7 +39,8 @@ def export(out: Path = DEFAULT_OUT) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build + save the precomputed rank index for the API to load.")
-    ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output artifact (.json or .json.gz)")
+    ap.add_argument("--out", type=Path, default=DEFAULT_OUT,
+                    help="output artifact (.npz, or legacy .json / .json.gz)")
     args = ap.parse_args()
     export(args.out)
 

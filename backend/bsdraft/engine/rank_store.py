@@ -14,9 +14,27 @@ latest tier per tag during the build, so it's dropped from the artifact. The ser
 tags as a single sorted NumPy byte-string array (``np.searchsorted`` for O(log n) lookup) and the
 tiers as a ``uint8`` array — far smaller than 1.3M Python str/int/dict objects.
 
-Format: gzipped JSON ``{"version":1, "tags":[...ascending...], "tiers":[...]}`` — parallel arrays,
-tags sorted so a lookup is a binary search. (A plain ``{tag: tier}`` dict would JSON-encode just
-as small but reload into exactly the ~120 MB of Python objects we're avoiding.)
+Two container formats, dispatched on the file's **magic bytes**, never its name — the sync layer
+writes every artifact to one fixed local path regardless of what the URL served, so the extension
+is not evidence of anything:
+
+- **``.npz`` (current, version 2)** — ``np.savez_compressed`` of the serve arrays themselves:
+  ``version`` (0-d int32), ``tags`` (1-D ``S``, ascending), ``tiers`` (1-D uint8). Loading is
+  essentially a decompress straight into the destination arrays, with no Python object ever
+  materialized per tag. Measured on the live 3.02M-tag index: **13.7 MB asset, ~0.3 s, ~66 MB
+  peak RSS**.
+- **gzipped JSON (legacy, version 1)** — ``{"version":1,"tags":[...ascending...],"tiers":[...]}``.
+  Same logical content, but decoding it costs a Python ``str`` per tag; even the slice-at-a-time
+  reader below peaks at **~263 MB** on that same index (13.9 MB asset, ~4.7 s). That transient is
+  what OOM-killed the 512 MB Render instance, so the JSON path is now read-only legacy.
+
+The JSON **reader** is kept indefinitely on purpose: it costs nothing at runtime and it is the
+rollback — a one-line revert of ``RANK_INDEX_URL`` returns to a format known to work in production.
+
+Tags are sorted by their **encoded** bytes, which is not the same order as sorting the Python
+strings: :func:`_ascii_bytes` encodes ascii-and-ignore, so ``sorted(["AB", "Aé"])`` encodes to
+``[b'AB', b'A']`` — *descending*, which would silently break the binary search. :func:`_sorted_arrays`
+is the one place that ordering is established, so the writer and the in-memory build cannot drift.
 """
 from __future__ import annotations
 
@@ -27,7 +45,20 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 1        # legacy gzipped-JSON container
+NPZ_FORMAT_VERSION = 2    # current .npz container
+
+# Widest tag the writer will emit. 'S' is fixed-width, so ONE oversized tag widens all ~3M rows
+# (at S10 the tags array is 30 MB; at S40 it would be 121 MB). Real Brawl Stars tags are 9 chars,
+# so this is a loud publish-time alarm on the machine with RAM to spare, not a routine limit.
+_MAX_TAG_BYTES = 16
+# The loader's bound is deliberately looser than the writer's: it is the hard memory ceiling for
+# an artifact we did not just build (32 x 3.0M = 96 MB), not a claim about what we publish.
+_MAX_LOAD_TAG_BYTES = 32
+# Sanity ceiling on the row count — a corrupt/hostile header could otherwise declare anything.
+_MAX_TAGS = 50_000_000
+_NPZ_MAGIC = b"PK\x03\x04"    # .npz is a zip archive
+_GZIP_MAGIC = b"\x1f\x8b"
 
 
 def _ascii_bytes(tags) -> np.ndarray:
@@ -35,6 +66,36 @@ def _ascii_bytes(tags) -> np.ndarray:
     non-ASCII tag can't raise (numpy ``dtype='S'`` would otherwise UnicodeEncodeError). Mirrors
     the same encoding :meth:`RankIndex.get` uses for the query, so lookups stay consistent."""
     return np.array([t.encode("ascii", "ignore") if isinstance(t, str) else t for t in tags], dtype="S")
+
+
+def _sorted_arrays(idx: Dict[str, object]):
+    """``{tag: (ts, tier)}`` (or ``{tag: tier}``) → the parallel serve arrays, sorted and validated.
+
+    The one place tag order is established, so the artifact writer and the in-memory build can't
+    drift — which matters now that the loader *enforces* ordering rather than trusting it.
+
+    Sorting the **encoded** bytes rather than the Python strings is load-bearing: ``_ascii_bytes``
+    encodes ascii-and-ignore, so ``sorted(["AB", "Aé"])`` encodes to ``[b'AB', b'A']`` — descending,
+    which would silently break :meth:`RankIndex.get`'s binary search for every tag after it.
+    Sorting *after* encoding makes the ascending invariant true by construction.
+    """
+    n = len(idx)
+    tags = _ascii_bytes(idx.keys())
+    # int16, not uint8: the range check has to see an out-of-range value, not a wrapped one. (numpy
+    # 2.x raises on the out-of-range cast, but requirements-serve.txt floors at an unpinned
+    # numpy>=1.26, so check explicitly instead of depending on which version the box resolves.)
+    tiers = np.fromiter(((v[1] if isinstance(v, tuple) else v) for v in idx.values()),
+                        dtype=np.int16, count=n)
+    if n:
+        # Tier range is a CORRECTNESS check, so it belongs on every path into the serve arrays:
+        # `.astype(uint8)` below wraps silently, where the old `np.array(..., dtype=uint8)` raised.
+        # The tag-WIDTH bound is not correctness — it's about the published artifact's size — so it
+        # lives in _save_npz, and the in-memory build stays as permissive as it has always been.
+        lo, hi = int(tiers.min()), int(tiers.max())
+        if lo < 1 or hi > 22:
+            raise ValueError(f"tier out of the 1-22 Ranked range (saw {lo}..{hi})")
+    order = np.argsort(tags, kind="stable")
+    return tags[order], tiers[order].astype(np.uint8)
 
 
 class RankIndex:
@@ -54,14 +115,17 @@ class RankIndex:
     @classmethod
     def from_mapping(cls, idx: Dict[str, object]) -> "RankIndex":
         """From ``{tag: (ts, tier)}`` (what ``build_rank_index`` returns) or ``{tag: tier}``."""
-        items = []
-        for tag, v in idx.items():
-            tier = v[1] if isinstance(v, tuple) else v
-            items.append((tag, int(tier)))
-        items.sort(key=lambda kv: kv[0])
-        tags = _ascii_bytes(t for t, _ in items)
-        tiers = np.array([t for _, t in items], dtype=np.uint8)
-        return cls(tags, tiers)
+        return cls(*_sorted_arrays(idx))
+
+    @classmethod
+    def empty(cls) -> "RankIndex":
+        """A valid index with no entries — every lookup returns None.
+
+        What the deployed API serves when the artifact can't be loaded, *instead* of rebuilding
+        from the match dataset: that rebuild is ~200 MB at 3M tags, i.e. the OOM this artifact
+        exists to prevent. Ranks reading as unknown for a refresh cycle beats taking the site down
+        for everyone."""
+        return cls(np.array([], dtype="S1"), np.array([], dtype=np.uint8))
 
     @classmethod
     def from_arrays(cls, tags_sorted, tiers) -> "RankIndex":
@@ -92,10 +156,41 @@ def index_payload(idx: Dict[str, Tuple[int, int]]) -> dict:
     }
 
 
+def _save_npz(idx: Dict[str, Tuple[int, int]], path: Path) -> Path:
+    """Write the current ``.npz`` container: the serve arrays themselves, compressed.
+
+    ``savez_compressed`` rather than ``savez`` because it is free: measured on the live 3.02M-tag
+    index the peak is within ~5 MB either way (numpy fills a preallocated destination from small
+    transients), while the asset is 13.7 MB instead of 33.2 MB — so the crawler's hourly re-upload
+    and Render's re-download stay exactly where they are today (13.9 MB as gzipped JSON).
+    """
+    tags, tiers = _sorted_arrays(idx)
+    if tags.dtype.itemsize > _MAX_TAG_BYTES:
+        raise ValueError(
+            f"tag of {tags.dtype.itemsize} bytes exceeds the {_MAX_TAG_BYTES}-byte publish bound; "
+            f"'S' is fixed-width, so one oversized tag widens all {tags.size} rows")
+    tmp = path.with_name(path.name + ".tmp")
+    # Write through an OPEN FILE OBJECT, never a path: np.savez APPENDS ".npz" to any path that
+    # doesn't already end in it, so np.savez("rank_index.npz.tmp") silently produces
+    # "rank_index.npz.tmp.npz" and leaves the temp path we're about to rename empty. A file object
+    # is written as-is. (Verified on numpy 2.4.6.)
+    with open(tmp, "wb") as fh:
+        np.savez_compressed(fh, version=np.array(NPZ_FORMAT_VERSION, dtype=np.int32),
+                            tags=tags, tiers=tiers)
+    tmp.replace(path)      # atomic: a reader never sees a half-written artifact
+    return path
+
+
 def save_rank_index(idx: Dict[str, Tuple[int, int]], path) -> Path:
-    """Write the ``tag -> tier`` index to ``path`` (gzipped JSON if it ends in ``.gz``)."""
+    """Write the ``tag -> tier`` index to ``path``, in the container its suffix names: ``.npz``
+    (current), gzipped JSON for ``.gz``, plain JSON otherwise.
+
+    Suffix dispatch is fine *here* — the caller chooses the filename — but never on the read side,
+    where the name comes from whatever the sync layer happened to save the download as."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".npz":
+        return _save_npz(idx, path)
     data = json.dumps(index_payload(idx), separators=(",", ":")).encode("utf-8")
     if path.suffix == ".gz":
         with gzip.open(path, "wb", compresslevel=6) as fh:
@@ -193,10 +288,75 @@ def _load_frugally(blob: bytes) -> Optional[RankIndex]:
     return RankIndex(tags, tiers)
 
 
+def _load_npz(path: Path) -> RankIndex:
+    """Load the ``.npz`` container, validating every assumption :meth:`RankIndex.get` relies on.
+
+    Everything raises ``ValueError``, the one exception the caller already reacts to — numpy leaks
+    ``BadZipFile`` / ``KeyError`` / ``OSError`` for a corrupt archive, which would otherwise escape
+    as a 500 instead of degrading.
+    """
+    try:
+        with np.load(path, allow_pickle=False) as z:      # `with` closes the fd; see below
+            missing = {"version", "tags", "tiers"} - set(z.files)
+            if missing:
+                raise ValueError(f"rank index npz missing member(s): {sorted(missing)}")
+            ver = int(z["version"])
+            if ver != NPZ_FORMAT_VERSION:
+                raise ValueError(f"unsupported rank index npz version {ver!r} "
+                                 f"(expected {NPZ_FORMAT_VERSION})")
+            # Materialize INSIDE the with-block — outside it the archive is closed and the lazy
+            # member read fails. tiers first: it's 3 MB against tags' 30 MB, so a malformed archive
+            # (including an object-dtype member, which allow_pickle=False rejects only on ACCESS,
+            # not on np.load) fails cheap.
+            tiers = z["tiers"]
+            tags = z["tags"]
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001 — normalize numpy/zipfile errors to the one the caller handles
+        raise ValueError(f"unreadable rank index npz: {type(e).__name__}: {e}") from e
+
+    if tags.ndim != 1 or tiers.ndim != 1:
+        raise ValueError(f"rank index arrays must be 1-D (got {tags.ndim}-D tags, {tiers.ndim}-D tiers)")
+    if tags.dtype.kind != "S":                 # 'U' would be 4x the bytes for the same content
+        raise ValueError(f"rank index tags must be byte strings, got dtype {tags.dtype}")
+    if tiers.dtype != np.uint8:                # int64 would be 8x, and every functional test passes
+        raise ValueError(f"rank index tiers must be uint8, got dtype {tiers.dtype}")
+    if tags.dtype.itemsize > _MAX_LOAD_TAG_BYTES:
+        raise ValueError(f"rank index tag width {tags.dtype.itemsize} exceeds {_MAX_LOAD_TAG_BYTES} bytes")
+    if tags.size != tiers.size:
+        raise ValueError(f"rank index arrays misaligned: {tags.size} tags vs {tiers.size} tiers")
+    if tags.size > _MAX_TAGS:
+        raise ValueError(f"rank index declares {tags.size} tags (ceiling {_MAX_TAGS})")
+    # Ordering is a correctness precondition, not a nicety: an unsorted array doesn't fail the
+    # binary search, it returns the WRONG tier. Non-strict `<=` on purpose — a duplicate tag
+    # resolves arbitrarily, which is a far smaller blast radius than rejecting the whole index.
+    # Measured at 0.14 s / ~3 MB on the live 3.02M-tag index, so it always runs.
+    if tags.size > 1 and not bool(np.all(tags[:-1] <= tags[1:])):
+        raise ValueError("rank index tags are not ascending; lookups would return wrong tiers")
+    # Construct directly: from_arrays would re-encode via _ascii_bytes's per-element Python loop —
+    # 3M iterations, which is precisely the cost this format exists to delete.
+    return RankIndex(tags, tiers)
+
+
 def load_rank_index(path) -> RankIndex:
-    """Load a :class:`RankIndex` from a (optionally gzipped) JSON artifact."""
-    raw = Path(path).read_bytes()
-    if raw[:2] == b"\x1f\x8b":
+    """Load a :class:`RankIndex` from the published artifact: ``.npz``, or legacy (gzipped) JSON.
+
+    Dispatch is on **magic bytes, not the filename** — ``data/sync.py`` writes whatever the URL
+    served to one fixed local path, so during a URL migration the extension and the contents
+    routinely disagree.
+
+    The sniff also has to happen before ``np.load`` is ever reached: ``np.load`` treats any
+    non-npy/npz blob as a raw pickle (on the legacy artifact it raises *"This file contains pickled
+    (object) data"*), so routing downloaded bytes into it would leave untrusted input one
+    ``allow_pickle`` flag away from code execution.
+    """
+    path = Path(path)
+    with open(path, "rb") as fh:
+        magic = fh.read(4)
+    if magic == _NPZ_MAGIC:
+        return _load_npz(path)
+    raw = path.read_bytes()
+    if raw[:2] == _GZIP_MAGIC:
         raw = gzip.decompress(raw)
     ver_at = raw.find(b'"version":')
     ver = None

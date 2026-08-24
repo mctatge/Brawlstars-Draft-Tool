@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 
 import numpy as np
 import pytest
@@ -132,3 +133,264 @@ def test_lookup_is_exact_not_prefix(tmp_path):
     loaded = _roundtrip(tmp_path, idx)
     assert loaded.get("ABC") == 4 and loaded.get("ABCDEF") == 9
     assert loaded.get("ABCD") is None and loaded.get("AB") is None
+
+
+# ---------------------------------------------------------------------------
+# The .npz container (current format).
+#
+# Loading the gzipped-JSON form peaked at 263 MB RSS on the live 3.02M-tag index — against ~195 MB
+# resident on a 512 MB box, that is the OOM. The .npz form stores the serve arrays themselves:
+# same 13.7 MB asset, ~66 MB peak, ~0.3 s. These tests pin the guarantees that swap depends on:
+# it decodes to a byte-identical index, it never reaches numpy's pickle path, and anything
+# malformed raises ValueError so the API degrades instead of rebuilding (which is the OOM again).
+# ---------------------------------------------------------------------------
+
+def _raw_npz(tmp_path, name="r.npz", *, version=RS.NPZ_FORMAT_VERSION, tags=None, tiers=None, omit=()):
+    """Write an npz archive member-by-member, so a test can express a MALFORMED artifact that
+    ``save_rank_index`` would never produce."""
+    members = {}
+    if "version" not in omit:
+        members["version"] = np.array(version, dtype=np.int32)
+    if "tags" not in omit:
+        members["tags"] = np.array([b"AA", b"BB"], dtype="S2") if tags is None else tags
+    if "tiers" not in omit:
+        members["tiers"] = np.array([3, 7], dtype=np.uint8) if tiers is None else tiers
+    path = tmp_path / name
+    with open(path, "wb") as fh:
+        np.savez_compressed(fh, **members)
+    return path
+
+
+# --- A. allow_pickle safety: the artifact is downloaded from a public URL -------------------
+
+def test_object_array_member_is_rejected_by_the_public_loader(tmp_path):
+    # np.load itself SUCCEEDS on this and even lists the members; allow_pickle=False only bites on
+    # member ACCESS. So the assertion has to be on load_rank_index, not on np.load.
+    path = _raw_npz(tmp_path, tags=np.array([{"evil": 1}], dtype=object))
+    with pytest.raises(ValueError):
+        RS.load_rank_index(path)
+
+
+def test_loader_never_enables_allow_pickle(tmp_path, monkeypatch):
+    # A refactor fence: someone adding mmap_mode or copying a np.load call must not drop this.
+    seen = {}
+    real = RS.np.load
+
+    def spy(*a, **kw):
+        seen["allow_pickle"] = kw.get("allow_pickle", "MISSING")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(RS.np, "load", spy)
+    RS.load_rank_index(RS.save_rank_index(_index(20), tmp_path / "r.npz"))
+    assert seen["allow_pickle"] is False
+
+
+def test_legacy_json_never_reaches_np_load(tmp_path, monkeypatch):
+    # np.load treats a non-npy/npz blob as a raw PICKLE — on the real legacy artifact it raises
+    # "This file contains pickled (object) data". The magic-byte sniff must run first so those
+    # downloaded bytes are never handed to it at all.
+    monkeypatch.setattr(RS.np, "load", lambda *a, **kw: pytest.fail("np.load reached for JSON"))
+    loaded = _roundtrip(tmp_path, _index(30), name="legacy.json.gz")
+    assert len(loaded) == 30
+
+
+# --- B. dispatch on CONTENT, not filename ---------------------------------------------------
+# sync.py writes whatever the URL served to one fixed local path, so during the URL migration the
+# extension and the contents routinely disagree. Both directions must work.
+
+def test_npz_content_loads_from_a_json_named_path(tmp_path):
+    src = RS.save_rank_index(_index(50), tmp_path / "r.npz")
+    misnamed = tmp_path / "rank_index.json"
+    misnamed.write_bytes(src.read_bytes())
+    assert len(RS.load_rank_index(misnamed)) == 50
+
+
+def test_gzipped_json_content_loads_from_an_npz_named_path(tmp_path):
+    src = RS.save_rank_index(_index(50), tmp_path / "r.json.gz")
+    misnamed = tmp_path / "rank_index.npz"
+    misnamed.write_bytes(src.read_bytes())
+    assert len(RS.load_rank_index(misnamed)) == 50
+
+
+def test_unrecognized_container_raises_rather_than_guessing(tmp_path):
+    path = tmp_path / "r.npz"
+    path.write_bytes(b"\x00\x01not-an-artifact")
+    with pytest.raises(ValueError):
+        RS.load_rank_index(path)
+
+
+# --- C. cross-format equivalence: the rollout safety net -------------------------------------
+
+def test_npz_and_json_produce_identical_indexes(tmp_path):
+    # The single strongest guard that swapping the published format changes nothing observable.
+    idx = _index(2000, width=lambda i: 6 + (i % 5))
+    a = RS.load_rank_index(RS.save_rank_index(idx, tmp_path / "r.json.gz"))
+    b = RS.load_rank_index(RS.save_rank_index(idx, tmp_path / "r.npz"))
+    assert _same(a, b)
+    assert _same(b, _plain_load(tmp_path / "r.json.gz"))    # ...and to the pre-existing oracle
+    for tag, (_, tier) in idx.items():
+        assert b.get(tag) == tier
+
+
+# --- D. validation chain: every failure is a ValueError the API already degrades on ----------
+
+@pytest.mark.parametrize("kwargs, why", [
+    ({"omit": ("version",)}, "missing version member"),
+    ({"omit": ("tiers",)}, "missing tiers member"),
+    ({"version": RS.NPZ_FORMAT_VERSION + 1}, "future format version"),
+    ({"tiers": np.array([3, 7], dtype=np.int64)}, "int64 tiers = 8x the memory"),
+    ({"tags": np.array(["AA", "BB"], dtype="U2")}, "unicode tags = 4x the memory"),
+    ({"tags": np.array([b"AA", b"BB", b"CC"], dtype="S2")}, "tags/tiers length mismatch"),
+    ({"tags": np.array([b"BB", b"AA"], dtype="S2")}, "descending tags"),
+    ({"tags": np.array([[b"AA"], [b"BB"]], dtype="S2")}, "2-D tags"),
+    ({"tags": np.array([b"A" * 40, b"B" * 40], dtype="S40")}, "tag width over the load ceiling"),
+])
+def test_malformed_npz_raises_valueerror(tmp_path, kwargs, why):
+    with pytest.raises(ValueError):
+        RS.load_rank_index(_raw_npz(tmp_path, **kwargs))
+
+
+def test_truncated_archive_is_normalized_to_valueerror(tmp_path):
+    # Raw numpy raises zipfile.BadZipFile here; the API only catches ValueError to degrade.
+    path = RS.save_rank_index(_index(500), tmp_path / "r.npz")
+    path.write_bytes(path.read_bytes()[: 1024])
+    with pytest.raises(ValueError):
+        RS.load_rank_index(path)
+
+
+# --- E. sortedness: a silent-wrong-answer class the JSON format hid --------------------------
+
+def test_writer_sorts_by_ENCODED_bytes_not_python_strings(tmp_path):
+    # _ascii_bytes drops non-ASCII, so sorted(["AB","Aé"]) encodes to [b'AB', b'A'] — DESCENDING.
+    # Sorting the strings first (the old index_payload order) puts the artifact out of order and
+    # every lookup past that point returns the wrong tier.
+    idx = {"AB": (1, 5), "Aé": (1, 9), "AA": (1, 2)}
+    loaded = RS.load_rank_index(RS.save_rank_index(idx, tmp_path / "r.npz"))
+    tags = loaded._tags
+    assert list(tags) == sorted(tags), "artifact tags are not ascending by encoded bytes"
+
+
+def test_unsorted_tags_are_rejected_not_silently_mis_searched(tmp_path):
+    # RankIndex.get would return a WRONG tier here rather than raise, so the loader must catch it.
+    with pytest.raises(ValueError, match="ascending"):
+        RS.load_rank_index(_raw_npz(tmp_path, tags=np.array([b"ZZ", b"AA"], dtype="S2")))
+
+
+def test_duplicate_tags_degrade_to_one_entry_rather_than_emptying_the_index(tmp_path):
+    # The check is non-strict (<=) on purpose: a duplicate resolves one tag arbitrarily, while a
+    # strict (<) check would reject the artifact and take the whole rank feature down.
+    loaded = RS.load_rank_index(_raw_npz(tmp_path, tags=np.array([b"AA", b"AA"], dtype="S2")))
+    assert loaded.get("AA") in (3, 7)
+
+
+# --- F. dtype / width preservation -----------------------------------------------------------
+
+def test_dtypes_and_width_survive_the_roundtrip(tmp_path):
+    idx = {}
+    for i in range(300):
+        idx[("T" * (2 + i % 10)) + f"{i:04d}"] = (1, (i % 22) + 1)   # 6..15 chars, under the bound
+    loaded = RS.load_rank_index(RS.save_rank_index(idx, tmp_path / "r.npz"))
+    assert loaded._tiers.dtype == np.uint8 and loaded._tags.dtype.kind == "S"
+    assert loaded._tags.dtype.itemsize == max(len(t) for t in idx)
+    for tag, (_, tier) in idx.items():
+        assert loaded.get(tag) == tier
+
+
+def test_writer_raises_on_an_oversized_tag(tmp_path):
+    # 'S' is fixed width: one 40-char tag widens all rows (30 MB -> 121 MB at 3M) and every
+    # functional test would still pass.
+    with pytest.raises(ValueError, match="exceeds"):
+        RS.save_rank_index({"A" * 40: (1, 5)}, tmp_path / "r.npz")
+
+
+@pytest.mark.parametrize("tier", [0, 23, -1, 300])
+def test_writer_raises_on_an_out_of_range_tier(tmp_path, tier):
+    # Pin OUR behavior, not numpy's: the uint8 cast wraps on some versions and raises on others.
+    with pytest.raises(ValueError, match="1-22"):
+        RS.save_rank_index({"AAA": (1, tier)}, tmp_path / "r.npz")
+
+
+# --- H. resource hygiene: this loader re-runs on a timer --------------------------------------
+
+def test_repeated_loads_do_not_leak_file_descriptors(tmp_path):
+    # np.load returns an open archive handle. Leaking one per refresh would also pin the inode
+    # that sync.py's tmp.replace() swapped out, so the API would keep reading the stale artifact.
+    path = RS.save_rank_index(_index(200), tmp_path / "r.npz")
+    RS.load_rank_index(path)
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(40):
+        RS.load_rank_index(path)
+    assert len(os.listdir("/dev/fd")) <= before + 2
+
+
+def test_loaded_index_owns_its_memory(tmp_path):
+    # Not a mmap: sync.py replaces this file underneath a live index every refresh.
+    path = RS.save_rank_index(_index(100), tmp_path / "r.npz")
+    loaded = RS.load_rank_index(path)
+    path.unlink()
+    assert len(loaded) == 100 and loaded.get(next(iter(_index(100)))) is not None
+
+
+# --- I. empty index ---------------------------------------------------------------------------
+
+def test_empty_npz_roundtrips(tmp_path):
+    loaded = RS.load_rank_index(RS.save_rank_index({}, tmp_path / "r.npz"))
+    assert len(loaded) == 0 and loaded.get("ANY") is None
+    assert loaded._tags.dtype.kind == "S"      # a bare np.array([]) would be float64
+
+
+def test_RankIndex_empty_is_a_working_index():
+    idx = RS.RankIndex.empty()
+    assert len(idx) == 0 and idx.get("ANY") is None      # must not IndexError
+
+
+# ---------------------------------------------------------------------------
+# The API's fallback. This is the half that actually removes the OOM: an unreadable artifact used
+# to fall back to RankIndex.from_mapping(build_rank_index()) -- a ~200 MB transient at 3M tags,
+# which OOM-kills the 512 MB instance and takes the SITE down, not just ranks. On a host with an
+# artifact URL configured, that rebuild must now be unreachable.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def api(monkeypatch):
+    """``api.main`` with a cleared rank cache, and the in-memory rebuild wired to fail the test."""
+    import bsdraft.api.main as M
+    monkeypatch.setattr(M, "_rank_idx_cache", None, raising=False)
+    return M
+
+
+def _forbid_rebuild(api, monkeypatch):
+    monkeypatch.setattr(api, "build_rank_index", lambda *a, **k: pytest.fail(
+        "fell back to building from matches — that is the ~200 MB OOM path"))
+
+
+def test_deployed_host_degrades_to_empty_when_the_artifact_is_missing(api, monkeypatch, tmp_path):
+    monkeypatch.setattr(api.settings, "rank_index_url", "https://example.invalid/rank_index.npz")
+    monkeypatch.setattr(api.sync, "RANK_INDEX_PATH", tmp_path / "absent.npz")
+    _forbid_rebuild(api, monkeypatch)
+    idx = api._rank_index()
+    assert len(idx) == 0 and idx.get("ANY") is None
+
+
+def test_deployed_host_degrades_to_empty_when_the_artifact_is_corrupt(api, monkeypatch, tmp_path):
+    bad = tmp_path / "rank_index.npz"
+    bad.write_bytes(b"PK\x03\x04truncated-garbage")     # PK magic, so it routes to the npz loader
+    monkeypatch.setattr(api.settings, "rank_index_url", "https://example.invalid/rank_index.npz")
+    monkeypatch.setattr(api.sync, "RANK_INDEX_PATH", bad)
+    _forbid_rebuild(api, monkeypatch)
+    assert len(api._rank_index()) == 0
+
+
+def test_deployed_host_loads_a_valid_artifact(api, monkeypatch, tmp_path):
+    path = RS.save_rank_index({"AAA": (1, 13)}, tmp_path / "rank_index.npz")
+    monkeypatch.setattr(api.settings, "rank_index_url", "https://example.invalid/rank_index.npz")
+    monkeypatch.setattr(api.sync, "RANK_INDEX_PATH", path)
+    _forbid_rebuild(api, monkeypatch)
+    assert api._rank_index().get("AAA") == 13
+
+
+def test_host_without_an_artifact_url_still_builds_in_memory(api, monkeypatch):
+    # The home machine and local dev have the RAM and no artifact — they must keep working.
+    monkeypatch.setattr(api.settings, "rank_index_url", "")
+    monkeypatch.setattr(api, "build_rank_index", lambda *a, **k: {"AAA": (1, 7)})
+    assert api._rank_index().get("AAA") == 7

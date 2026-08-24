@@ -77,21 +77,34 @@ def _build_stats():
 
 
 def _rank_index() -> RankIndex:
-    """Cached ``tag -> tier`` lookup. When RANK_INDEX_URL is set the API **loads** the precomputed
-    artifact (a compact NumPy-backed ~20 MB structure, no in-memory build); otherwise it **builds**
-    the index from the synced matches (~1.3M-entry dict, ~200 MB) and packs it down. Rebuilt lazily
-    when the synced artifact changes (``_rank_version``) or, for the local build, when the matches
-    change (``_last_change``)."""
+    """Cached ``tag -> tier`` lookup.
+
+    **When RANK_INDEX_URL is set (the deployed API) this only ever LOADS the published artifact,
+    and serves an EMPTY index if that fails.** It deliberately does not fall back to building from
+    the matches there: that build is a ~200 MB transient at 3M tags, which OOM-kills a 512 MB box
+    and takes the whole site down for everyone — strictly worse than ranks reading as unknown until
+    the next sync. The artifact exists precisely to avoid that build, so "artifact unavailable"
+    must never route back into it. Only a host with no artifact URL configured (home machine /
+    local dev, which has the RAM) builds in memory.
+
+    Cached under ``(use_artifact, _rank_version)``, so an empty index sticks until
+    ``sync_rank_index`` reports a change rather than retrying a failing load on every request —
+    a persistently broken artifact stays quietly degraded, which is intended."""
     global _rank_idx_cache
-    use_artifact = bool(settings.rank_index_url) and sync.RANK_INDEX_PATH.exists()
+    use_artifact = bool(settings.rank_index_url)
     token = (use_artifact, _rank_version if use_artifact else _last_change)
     if _rank_idx_cache is None or _rank_idx_cache[0] != token:
         if use_artifact:
             try:
                 idx = load_rank_index(sync.RANK_INDEX_PATH)
-            except Exception as e:  # noqa: BLE001 — a corrupt/old artifact must fall back, not 500
-                logger.warning("rank index load failed (%s); building from matches", e)
-                idx = RankIndex.from_mapping(build_rank_index())
+            except FileNotFoundError:
+                logger.error("rank index artifact missing at %s — serving an EMPTY index "
+                             "(ranks unknown) until the next sync", sync.RANK_INDEX_PATH)
+                idx = RankIndex.empty()
+            except Exception as e:  # noqa: BLE001 — a corrupt/old artifact degrades, never 500s
+                logger.error("rank index load failed (%s) — serving an EMPTY index (ranks unknown) "
+                             "until the next sync", e)
+                idx = RankIndex.empty()
         else:
             idx = RankIndex.from_mapping(build_rank_index())
         _rank_idx_cache = (token, idx)
