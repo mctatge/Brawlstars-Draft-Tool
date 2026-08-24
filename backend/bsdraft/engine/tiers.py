@@ -32,6 +32,19 @@ def min_power_for_bracket(bracket: Optional[str]) -> int:
     return 11 if bracket in _P11_BRACKETS else 9
 
 
+# Mythic (tier 13) is the lowest bracket where the client offers per-seat "I'm pick"
+# personalization — below it the board shows a meta+personal rail with no seat to personalize. So
+# it's also the floor for warming a player's personal stats at LOAD (see the API's _warm_personal).
+# Derived by name so it survives a ladder edit.
+MYTHIC_MIN_TIER = next(lo for lo, _, name in _RANGES if name == "Mythic")   # 13
+
+
+def is_mythic_plus(tier: Optional[int]) -> bool:
+    """True for Mythic and up (tier >= 13), the bracket range that gets per-seat personalization.
+    None (unknown / unplaced) is False."""
+    return tier is not None and tier >= MYTHIC_MIN_TIER
+
+
 def bracket_of_tier(tier: int) -> Optional[str]:
     for lo, hi, name in _RANGES:
         if lo <= tier <= hi:

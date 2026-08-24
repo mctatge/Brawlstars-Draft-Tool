@@ -38,7 +38,7 @@ from bsdraft.engine.playerrank import build_rank_index, current_ranked_tier
 from bsdraft.engine.rank_store import RankIndex, load_rank_index
 from bsdraft.engine.stats import DraftStats, build_bracketed
 from bsdraft.engine.stats_store import load_stats
-from bsdraft.engine.tiers import BRACKETS, bracket_of_tier, min_power_for_bracket, tier_label
+from bsdraft.engine.tiers import BRACKETS, bracket_of_tier, is_mythic_plus, min_power_for_bracket, tier_label
 from bsdraft.models.serve import WinProbModel
 
 logger = logging.getLogger("bsdraft.api")
@@ -126,6 +126,46 @@ def _personal_for(tag: Optional[str]):
         ps = build_personal_stats(t, fallback=_engine.stats)
         _personal_cache[t] = (_last_change, ps)
         return ps
+
+
+# Cap how many personal-stats warms run at once. Each warm streams the full ``matches.jsonl`` to
+# filter one tag's games (seconds on the cloud dataset, on the free tier's CPU sliver), so an
+# unbounded thread-per-LOAD would let a burst of distinct tags — many drafters, or a bot hitting
+# /api/rank — spawn a scan pile-up that starves the box and can time out the health check. Warming
+# is best-effort (the pick phase rebuilds lazily on a miss), so a full pool skips rather than queues.
+# 2 keeps a normal LOAD warm without saturating the instance; tune if needed.
+_WARM_MAX_CONCURRENCY = 2
+_warm_slots = threading.BoundedSemaphore(_WARM_MAX_CONCURRENCY)
+
+
+def _warm_personal(tag: Optional[str]) -> None:
+    """Fire-and-forget: build this tag's personal stats off the critical path. The dataset scan
+    behind ``build_personal_stats`` takes seconds on the full cloud dataset, and it's deferred to
+    the pick phase (see the recommend handler), so a personalized seat's *first* pick would block
+    on it — the "analyzing…" stall. We know the tag much earlier: it's resolved when the player
+    hits LOAD (``/api/rank``). Warming here means the scan runs during the ban phase and the pick-1
+    request hits the warm cache. The single-flight lock in ``_personal_for`` makes a concurrent
+    warm + real request share one scan, so this never doubles the work.
+
+    Bounded to ``_WARM_MAX_CONCURRENCY`` in-flight warms: when the pool is full this skips the warm
+    (the pick-phase build still covers the tag lazily) rather than piling scan threads onto the
+    free tier — the whole point of warming is to save latency, never to risk the box."""
+    t = normalize_tag(tag or "")
+    if not t or _engine is None or _personal_cache.get(t, (None,))[0] == _last_change:
+        return
+    if not _warm_slots.acquire(blocking=False):
+        return  # warm pool full — skip; the pick-phase build covers this tag lazily on a miss
+
+    def _run() -> None:
+        try:
+            _personal_for(t)
+        finally:
+            _warm_slots.release()
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="warm-personal").start()
+    except RuntimeError:      # thread table exhausted — release the slot and skip, don't 500 the LOAD
+        _warm_slots.release()
 
 
 async def _refresh_loop() -> None:
@@ -494,9 +534,17 @@ async def rank(tag: str):
         # "ok" and "unplaced" are both answers about *this* season — return them as-is. Only
         # "unavailable" (no answer at all) may fall through to the pre-reset crawl snapshot.
         if status in ("ok", "unplaced"):
+            # The player just entered their tag (LOAD) — warm this tag's personal stats now, in the
+            # background, so a personalized seat's first pick doesn't block on the scan later (see
+            # _warm_personal). Only for Mythic+, the one bracket range the client personalizes per
+            # seat: below it there's no seat to personalize, so the scan would be wasted work.
+            if is_mythic_plus(live.tier):
+                _warm_personal(tag_n)
             return live
     t = _rank_index().get(tag_n)
     if t:
+        if is_mythic_plus(t):
+            _warm_personal(tag_n)   # Mythic+ only, and off the critical path — see the live branch
         return S.RankResponse(found=True, tag=tag_n, tier=t, tier_label=tier_label(t),
                               bracket=bracket_of_tier(t), source="dataset",
                               # A dataset row is a crawl snapshot with no season stamp: after a
