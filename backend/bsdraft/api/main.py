@@ -26,6 +26,7 @@ from bsdraft.config import settings
 from bsdraft.constants import RANKED_MODES
 from bsdraft.data import reference as R
 from bsdraft.data import sync
+from bsdraft.data.dataset import count_matches
 from bsdraft.engine import mastery
 from bsdraft.engine.drift import detect_drift, load_report
 from bsdraft.engine.engine import DraftEngine
@@ -44,6 +45,7 @@ from bsdraft.models.serve import WinProbModel
 logger = logging.getLogger("bsdraft.api")
 
 _engine: Optional[DraftEngine] = None
+_dataset_count: int = 0    # total matches in the synced dataset (headline count; recomputed on sync change)
 _last_check: float = 0.0   # epoch of the last sync attempt (liveness)
 _last_change: float = 0.0  # epoch of the last actual data change
 _meta_cache = None         # (data_version, MetaReport); recomputed lazily when data changes
@@ -184,7 +186,7 @@ def _warm_personal(tag: Optional[str]) -> None:
 async def _refresh_loop() -> None:
     """Periodically re-sync the dataset (and model) and hot-swap rebuilt stats / a reloaded
     model into the live engine, so a fresh crawl or retrain rolls out with no restart."""
-    global _last_check, _last_change, _rank_version
+    global _last_check, _last_change, _rank_version, _dataset_count
     loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(settings.refresh_seconds)
@@ -194,6 +196,7 @@ async def _refresh_loop() -> None:
             _last_check = time.time()
             if data_changed and _engine is not None:
                 _last_change = time.time()  # invalidate the rank / meta / personal caches
+                _dataset_count = await loop.run_in_executor(None, count_matches)  # refresh headline count
             # Refresh the published meta-drift report (a few KB) — /api/meta reads the file per
             # request, so a changed artifact is picked up with no eager work here.
             if settings.meta_report_url:
@@ -233,7 +236,7 @@ async def _refresh_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _engine, _last_check, _last_change
+    global _engine, _last_check, _last_change, _dataset_count
     loop = asyncio.get_running_loop()
     if settings.data_url:
         await loop.run_in_executor(None, sync.sync_matches, settings.data_url)
@@ -250,6 +253,7 @@ async def lifespan(app: FastAPI):
         await loop.run_in_executor(None, sync.sync_itemstats, settings.itemstats_url)
     g, br = _build_stats()
     _engine = DraftEngine(g, WinProbModel(), bracket_stats=br)
+    _dataset_count = await loop.run_in_executor(None, count_matches)  # headline count over the full dataset
     if settings.player_tag:
         ptag = normalize_tag(settings.player_tag)
         try:
@@ -291,7 +295,7 @@ def health():
     return {
         "status": "ok",
         "model": bool(_engine and _engine.model and _engine.model.available),
-        "matches": _engine.stats.n if _engine else 0,
+        "matches": _dataset_count or (_engine.stats.n if _engine else 0),
         "roster": bool(_engine and _engine.roster),
         "refresh_seconds": settings.refresh_seconds if settings.data_url else 0,
         "last_check": _last_check or None,

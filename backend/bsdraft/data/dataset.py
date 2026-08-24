@@ -73,6 +73,21 @@ def recent_matches(n: int, path: Optional[Path] = None) -> list:
     return [r for _, _, r in heap]
 
 
+def count_matches(path: Optional[Path] = None) -> int:
+    """Total number of stored matches — a fast newline count over matches.jsonl that never parses
+    JSON, so it stays cheap on the full multi-GB dataset (peak RAM = one 1 MB chunk). Each match is
+    serialized as exactly one line (see :mod:`bsdraft.collect.match`), so the newline count is the
+    match count. Returns 0 when there's no data yet (e.g. a cloud cold start before the first sync)."""
+    path = path or (RAW_DIR / "matches.jsonl")
+    if not Path(path).exists():
+        return 0
+    total = 0
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            total += chunk.count(b"\n")
+    return total
+
+
 def build_dataset(path: Optional[Path] = None, ranked_maps_only: bool = True) -> Dataset:
     bidx = E.brawler_encoder()
     a_rows, b_rows, maps, modes, ys, tss, qs = [], [], [], [], [], [], []
