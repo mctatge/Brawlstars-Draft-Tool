@@ -137,6 +137,15 @@ class RankIndex:
         if self._tags.size == 0:
             return None
         key = tag.encode("ascii", "ignore")
+        # A key wider than the array's fixed width cannot be *stored* in that array, so it can
+        # never match — answer None without touching searchsorted. Handing it over instead would
+        # promote BOTH operands to the key's width, materializing a full-width copy of all N rows:
+        # measured at 3.03M tags, a 200-byte tag allocates ~495 MB and OOM-kills a 512 MB instance.
+        # `tag` arrives straight from the unauthenticated /api/rank query string and normalize_tag
+        # imposes no length bound, so this is a remote memory-exhaustion vector, not a rare edge.
+        # Truncating to the width instead of rejecting would be wrong — it would invent matches.
+        if len(key) > self._tags.dtype.itemsize:
+            return None
         i = int(np.searchsorted(self._tags, key))
         if i < self._tags.size and self._tags[i] == key:
             return int(self._tiers[i])

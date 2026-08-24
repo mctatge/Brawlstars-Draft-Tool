@@ -344,6 +344,36 @@ def test_RankIndex_empty_is_a_working_index():
     assert len(idx) == 0 and idx.get("ANY") is None      # must not IndexError
 
 
+def test_over_length_lookup_does_not_copy_the_whole_array(tmp_path):
+    """An over-wide key must be answered without reaching searchsorted.
+
+    `tag` comes straight from the unauthenticated /api/rank query string, and numpy promotes BOTH
+    operands to the wider dtype — so a long tag copies every row at the key's width. Measured at
+    3.03M tags a 200-byte tag allocates ~495 MB, which OOM-kills the 512 MB instance. The guard is
+    exact, not a heuristic: an 'S10' array cannot hold an 11-byte value, so no match is possible.
+    """
+    idx = RS.load_rank_index(RS.save_rank_index(_index(500), tmp_path / "r.npz"))
+    width = idx._tags.dtype.itemsize
+    calls = []
+    real = RS.np.searchsorted
+
+    def spy(a, v, *args, **kw):
+        calls.append(len(v))
+        return real(a, v, *args, **kw)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(RS.np, "searchsorted", spy)
+    try:
+        assert idx.get("A" * (width + 1)) is None
+        assert idx.get("A" * 200) is None
+        assert calls == [], "an over-wide key reached searchsorted and promoted the whole array"
+        # ...and a legitimately-sized key still searches and still resolves.
+        tag, (_, tier) = next(iter(_index(500).items()))
+        assert idx.get(tag) == tier and calls, "in-width lookups must still use searchsorted"
+    finally:
+        monkey.undo()
+
+
 # ---------------------------------------------------------------------------
 # The API's fallback. This is the half that actually removes the OOM: an unreadable artifact used
 # to fall back to RankIndex.from_mapping(build_rank_index()) -- a ~200 MB transient at 3M tags,
