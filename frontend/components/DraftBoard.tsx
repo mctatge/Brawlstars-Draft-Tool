@@ -600,6 +600,9 @@ export default function DraftBoard() {
   const [their, setTheir] = useState<(number | null)[]>(Array(TEAM_N).fill(null));
   const [wePickFirst, setWePickFirst] = useState(true);
   const [activeOverride, setActiveOverride] = useState<Slot | null>(null);
+  // Stack of slots in the order brawlers were placed, so Backspace/Delete can undo the most recent
+  // pick or ban. Entries may go stale (a slot later cleared or refilled); undoLast skips those.
+  const [placeHistory, setPlaceHistory] = useState<Slot[]>([]);
   const [solo, setSolo] = useState(true);
   const [recs, setRecs] = useState<RecommendResponse | null>(null);
   // Blind-pick dual columns only: the personalized pick list fetched alongside the general one.
@@ -935,7 +938,9 @@ export default function DraftBoard() {
 
   const place = (bid: number) => {
     if (!active || used.has(bid)) return;
-    setZone(active.zone, active.index, bid);
+    const slot = active;
+    setZone(slot.zone, slot.index, bid);
+    setPlaceHistory((h) => [...h, slot]);   // remember it so Backspace can undo this placement
     setActiveOverride(null);
     setQuery("");
     focusSearch();
@@ -946,8 +951,29 @@ export default function DraftBoard() {
     setOur(Array(TEAM_N).fill(null));
     setTheir(Array(TEAM_N).fill(null));
     setActiveOverride(null);
+    setPlaceHistory([]);
+    setQuery("");      // also clear whatever's typed in the search box
     setLoadouts({});   // comp-keyed entries are stale across drafts; refetch is cheap
     focusSearch();
+  };
+
+  // Backspace / Delete removes the most recently placed brawler — a fast "undo that pick". Walks the
+  // placement stack back past any slots since cleared or refilled, clears the newest still-filled
+  // one, and parks the active cursor there to re-pick. No-op when nothing is on the board.
+  const undoLast = () => {
+    const h = placeHistory.slice();
+    while (h.length) {
+      const slot = h.pop()!;
+      const arr = slot.zone === "ban" ? bans : slot.zone === "our" ? our : their;
+      if (arr[slot.index] != null) {
+        setZone(slot.zone, slot.index, null);
+        setActiveOverride(slot);
+        setPlaceHistory(h);
+        focusSearch();
+        return;
+      }
+    }
+    setPlaceHistory(h);   // every entry was stale — reset the empty stack
   };
 
   const checkRank = async () => {
@@ -973,6 +999,32 @@ export default function DraftBoard() {
     setRankInfo(null);
     localStorage.removeItem("bsdraft.tag");
   };
+
+  // Auto-refresh the player's live rank on every map switch. A new map usually means a new game, and
+  // rank can drift between games — a promotion, or a boot-time lookup that fell back to a stale
+  // dataset tier (rank resolution is live-first). Forgetting to hit LOAD then leaves you drafting at
+  // the wrong bracket. Gentle on purpose: it updates only on a positive hit, so a transient live
+  // failure keeps the last known rank instead of wiping it. Skips the first map load — boot already
+  // resolved the saved tag.
+  const didInitMap = useRef(false);
+  useEffect(() => {
+    if (!mapId) return;
+    if (!didInitMap.current) { didInitMap.current = true; return; }
+    const t = tag.trim();
+    if (!t) return;
+    let cancelled = false;
+    getRank(t)
+      .then((info) => {
+        if (cancelled || !info.found) return;
+        setRankInfo(info);
+        setTag(info.tag);
+        localStorage.setItem("bsdraft.tag", info.tag);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // Fires on map switches only; it intentionally reads the current tag without re-subscribing on
+    // every keystroke in the tag box.
+  }, [mapId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -1067,6 +1119,27 @@ export default function DraftBoard() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [gridFocus, filtered, used, myTurn, fieldableSet, boostedSet, step.kind]);
+
+  // Backspace / Delete undoes the last placed brawler. It fires only when the keystroke isn't editing
+  // text: in the search box just when it's empty (otherwise it deletes a character — and the box is
+  // empty right after every placement, so a stray press there naturally undoes the pick you just
+  // made), and never in the tag box or any other field. Elsewhere (a grid tile, the board, nowhere)
+  // it always undoes. No-op when nothing is on the board — undoLast handles that.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key !== "Backspace" && e.key !== "Delete") || e.ctrlKey || e.altKey || e.metaKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el === searchRef.current) {
+        if (query.length > 0) return; // editing the search text
+      } else if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) {
+        return; // the tag box or any other field keeps native edit behavior
+      }
+      e.preventDefault();
+      undoLast();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [query, placeHistory, bans, our, their]);
 
   const rotation = useMemo(
     () => (ref?.maps || []).filter((m) => m.games > 0).sort((a, b) =>
@@ -1261,7 +1334,9 @@ export default function DraftBoard() {
               {!blindPick && (
                 <div>
                   <div className="label mb-2" style={{ color: "var(--red)" }}>◢ Enemy team</div>
-                  <div className="flex gap-2">{their.map((_, i) => <SlotBox key={i} zone="their" index={i} accent="var(--red)" />)}</div>
+                  {/* Reversed so the enemy's FIRST pick sits in the far-right slot, mirroring the
+                      in-game layout — their[0] is still their first pick, only the display flips. */}
+                  <div className="flex gap-2">{[...their.keys()].reverse().map((i) => <SlotBox key={i} zone="their" index={i} accent="var(--red)" />)}</div>
                 </div>
               )}
             </div>

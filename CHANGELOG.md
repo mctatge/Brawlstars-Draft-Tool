@@ -6,6 +6,22 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-08-23
 
+- **Backspace now undoes your last pick.** Press Backspace (or Delete) with the command box empty —
+  which it always is right after you place something — and the most recently drafted brawler is
+  removed and its slot re-armed to pick again. While you're mid-type it still edits your search text,
+  and with nothing on the board it does nothing.
+
+- **The enemy's first pick now sits on the far right.** Their draft fills right-to-left, mirroring
+  the in-game layout so the board matches what you're looking at. Your own team is unchanged —
+  first pick stays on the left.
+
+- **Your rank re-checks itself every time you switch maps.** Switching maps usually means a new game,
+  and rank can drift between games, so the tool now refreshes your live tier automatically instead of
+  waiting for you to hit Load — no more drafting a game at last game's rank. It only updates on a
+  successful lookup, so a momentary hiccup keeps your last known rank rather than dropping it.
+
+- **Reset now also clears the search box**, so a fresh draft starts with an empty command line.
+
 - **The Heist map "Safe(r) Zone" is back in the pool.** It's live in the ranked rotation, but the
   upstream Brawlify/BrawlAPI catalog still flags it disabled, so it was being filtered out entirely.
   A small force-enable override now keeps it in the ranked pool (and survives the next catalog
