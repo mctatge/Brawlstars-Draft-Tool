@@ -11,6 +11,12 @@ Compares against baselines (always-0.5 and logistic regression on brawler presen
 reports log-loss / accuracy / AUC / ECE on a held-out split — both on full comps
 (comparable across retrains) and per partial draft state — saves the model + config to
 data/processed/winprob.pt, and writes calibration + training-curve charts to docs/.
+
+With --candidates N > 1 it trains N models (seeds seed..seed+N-1) on the SAME split and
+keeps the one with the lowest full-comp val logloss (best-of-N). The no-regression gate is
+applied to the winner only. This exists because the paired full-comp delta swings more
+between seeds (~0.0035, measured) than the 0.002 gate, so a single unattended retrain passes
+or fails by luck; best-of-N reliably surfaces a candidate at or below the incumbent.
 """
 from __future__ import annotations
 
@@ -86,6 +92,83 @@ def brawler_diff_features(team_a: np.ndarray, team_b: np.ndarray, n_brawlers: in
     return x
 
 
+def _train_candidate(seed: int, cfg: ModelConfig, args, shared: dict) -> dict:
+    """Train one masked model at ``seed`` and score it on the SHARED held-out split.
+
+    Returns the fitted (best-epoch) model plus its full-comp val metrics and training curves.
+    Deliberately does no artifact writing, no gate check, and no partial-state eval — the caller
+    keeps only the winning candidate and does those once. Every candidate reads the same
+    seed-independent tensors from ``shared`` (including the val split), so candidates differ
+    purely in weight init and per-epoch mask draws and are directly comparable on identical rows.
+    """
+    ta, tb, mp, mo = shared["ta"], shared["tb"], shared["mp"], shared["mo"]
+    tr_i, vai, yv = shared["tr_i"], shared["vai"], shared["yv"]
+    ta_tr, tb_tr = shared["ta_tr"], shared["tb_tr"]
+    y_tr, wt_tr, mp_tr, mo_tr = shared["y_tr"], shared["wt_tr"], shared["mp_tr"], shared["mo_tr"]
+
+    torch.manual_seed(seed)
+    model = WinProbNet(cfg)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    bce = nn.BCEWithLogitsLoss(reduction="none")
+    rng = np.random.default_rng(seed)
+
+    # Fixed masked copy of the val split (same p-full mixture as training): early stopping
+    # runs on this — it contains full comps, so full-comp regressions still move it — while
+    # the headline metrics below stay unmasked and comparable across retrains.
+    va_m, vb_m = mask_teams(shared["ta_val_np"], shared["tb_val_np"], cfg.mask_row, args.p_full,
+                            np.random.default_rng(seed + 1))
+    tam_v, tbm_v = torch.from_numpy(va_m), torch.from_numpy(vb_m)
+
+    def batches(n_rows, bs):
+        order = torch.randperm(n_rows)
+        for k in range(0, n_rows, bs):
+            yield order[k:k + bs]
+
+    # Early stopping tracks the mixed (masked) loss — the model's actual job — while the
+    # full-comp loss is recorded alongside so a full-comp regression is visible per epoch.
+    history_mix, history_full = [], []
+    best_ll, best_state, bad, patience = float("inf"), None, 0, 6
+    for _ in range(args.epochs):
+        ta_m, tb_m = mask_teams(ta_tr, tb_tr, cfg.mask_row, args.p_full, rng)
+        tam, tbm = torch.from_numpy(ta_m), torch.from_numpy(tb_m)
+        model.train()
+        for bi in batches(len(tr_i), args.batch):
+            opt.zero_grad()
+            logit = model(tam[bi], tbm[bi], mp_tr[bi], mo_tr[bi])
+            loss = (bce(logit, y_tr[bi]) * wt_tr[bi]).mean()
+            loss.backward()
+            opt.step()
+        model.eval()
+        with torch.no_grad():
+            pv_mix = torch.sigmoid(model(tam_v, tbm_v, mp[vai], mo[vai])).numpy()
+            pv_full = torch.sigmoid(model(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
+        vll = log_loss(yv, pv_mix, labels=[0, 1])
+        history_mix.append(vll)
+        history_full.append(float(log_loss(yv, pv_full, labels=[0, 1])))
+        if vll < best_ll - 1e-4:
+            best_ll, bad = vll, 0
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        else:
+            bad += 1
+            if bad >= patience:
+                break
+
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.no_grad():
+        pv = torch.sigmoid(model(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
+        pv_mix = torch.sigmoid(model(tam_v, tbm_v, mp[vai], mo[vai])).numpy()
+    return {
+        "seed": seed, "model": model, "pv": pv,
+        "m_ll": float(log_loss(yv, pv, labels=[0, 1])),
+        "m_auc": float(roc_auc_score(yv, pv)),
+        "m_acc": float(((pv > 0.5) == yv.astype(bool)).mean()),
+        "m_ece": float(expected_calibration_error(pv, yv)),
+        "mix_ll": float(log_loss(yv, pv_mix, labels=[0, 1])),
+        "history_mix": history_mix, "history_full": history_full,
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=40)
@@ -103,10 +186,24 @@ def main() -> None:
                          "logloss exceeds the previous checkpoint's by more than this on the "
                          "same rows — keeps the unattended --retrain-on-shift path from "
                          "publishing a regressed model. Set <0 to disable.")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=0,
+                    help="base RNG seed. The train/val split is fixed by this seed; with "
+                         "--candidates N the models use seeds seed..seed+N-1 but all share "
+                         "that one split, so their full-comp val logloss is comparable.")
+    ap.add_argument("--candidates", type=int, default=1,
+                    help="best-of-N: train this many models (seeds seed..seed+N-1) on the SAME "
+                         "split and keep the lowest full-comp val logloss; the gate is applied to "
+                         "the winner only. The paired full-comp delta swings more between seeds "
+                         "(~0.0035) than the 0.002 gate, so a single unattended retrain passes or "
+                         "fails by luck — the crawler's --retrain-on-shift path uses N>1 to fix "
+                         "that. Costs Nx training time. N=1 reproduces single-seed training.")
     args = ap.parse_args()
 
-    torch.manual_seed(args.seed)
+    if args.candidates < 1:
+        raise SystemExit("--candidates must be >= 1")
+
+    # Seeds the shared split below (np.random.permutation). Per-candidate weight init and mask
+    # draws are seeded inside _train_candidate, so N=1 reproduces the old single-seed run exactly.
     np.random.seed(args.seed)
 
     ds = D.build_dataset()
@@ -129,13 +226,13 @@ def main() -> None:
         w = np.ones(n, dtype=np.float32)
     wt = torch.tensor(w)
 
-    idx = np.random.permutation(n)
+    idx = np.random.permutation(n)   # split fixed by args.seed, shared across all candidates
     n_val = int(n * args.val_frac)
     val_i, tr_i = idx[:n_val], idx[n_val:]
     vai, tri = torch.tensor(val_i), torch.tensor(tr_i)
     yv = ds.y[val_i]
 
-    # --- baselines ---
+    # --- baselines (seed-independent given the split) ---
     const_ll = log_loss(yv, np.full_like(yv, 0.5), labels=[0, 1])
     x_tr = brawler_diff_features(ds.team_a[tr_i], ds.team_b[tr_i], E.num_brawlers())
     x_va = brawler_diff_features(ds.team_a[val_i], ds.team_b[val_i], E.num_brawlers())
@@ -171,69 +268,42 @@ def main() -> None:
             print("previous winprob.pt was trained on a different vocabulary — skipping the "
                   "paired baseline")
 
-    # --- embedding model (masked partial-draft training) ---
     cfg = ModelConfig(E.num_brawlers(), E.num_maps(), E.num_modes(), mask_row=E.num_brawlers())
-    model = WinProbNet(cfg)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    bce = nn.BCEWithLogitsLoss(reduction="none")
-    rng = np.random.default_rng(args.seed)
 
-    # Fixed masked copy of the val split (same p-full mixture as training): early stopping
-    # runs on this — it contains full comps, so full-comp regressions still move it — while
-    # the headline metrics below stay unmasked and comparable across retrains.
-    va_m, vb_m = mask_teams(ds.team_a[val_i], ds.team_b[val_i], cfg.mask_row, args.p_full,
-                            np.random.default_rng(args.seed + 1))
-    tam_v, tbm_v = torch.from_numpy(va_m), torch.from_numpy(vb_m)
+    # Seed-independent tensors every candidate reuses; passed by reference, never mutated.
+    shared = {
+        "ta": ta, "tb": tb, "mp": mp, "mo": mo,
+        "tr_i": tr_i, "vai": vai, "yv": yv,
+        "ta_tr": ds.team_a[tr_i], "tb_tr": ds.team_b[tr_i],
+        "ta_val_np": ds.team_a[val_i], "tb_val_np": ds.team_b[val_i],
+        "y_tr": y[tri], "wt_tr": wt[tri], "mp_tr": mp[tri], "mo_tr": mo[tri],
+    }
 
-    def batches(n_rows, bs):
-        order = torch.randperm(n_rows)
-        for k in range(0, n_rows, bs):
-            yield order[k:k + bs]
+    # --- best-of-N: train candidates on the shared split, keep the lowest full-comp val logloss ---
+    n_cand = args.candidates
+    candidates = []
+    for i in range(n_cand):
+        seed = args.seed + i
+        if n_cand > 1:
+            print(f"\n--- candidate {i + 1}/{n_cand} (seed {seed}) …")
+        c = _train_candidate(seed, cfg, args, shared)
+        candidates.append(c)
+        if n_cand > 1:
+            d = f"{c['m_ll'] - baseline['logloss']:+.4f}" if baseline else "n/a"
+            print(f"    full-comp val logloss {c['m_ll']:.4f}  (delta vs incumbent {d})")
+    best = min(candidates, key=lambda c: c["m_ll"])
+    if n_cand > 1:
+        lls = ", ".join(f"{c['m_ll']:.4f}" for c in candidates)
+        print(f"\n=== best-of-{n_cand}: chose seed {best['seed']} "
+              f"(full-comp val logloss {best['m_ll']:.4f}, lowest of [{lls}]) ===")
 
-    # Train-slice views, positionally indexed — only the 85% train rows get re-masked and
-    # copied each epoch (the val rows have their own fixed masked copy above).
-    ta_tr, tb_tr = ds.team_a[tr_i], ds.team_b[tr_i]
-    y_tr, wt_tr, mp_tr, mo_tr = y[tri], wt[tri], mp[tri], mo[tri]
-
-    # Early stopping tracks the mixed (masked) loss — the model's actual job — while the
-    # full-comp loss is recorded alongside so a full-comp regression is visible per epoch
-    # and gate failures (vs the paired baseline) have a remediation lever: raise --p-full.
-    history_mix, history_full = [], []
-    best_ll, best_state, bad, patience = float("inf"), None, 0, 6
-    for _ in range(args.epochs):
-        ta_m, tb_m = mask_teams(ta_tr, tb_tr, cfg.mask_row, args.p_full, rng)
-        tam, tbm = torch.from_numpy(ta_m), torch.from_numpy(tb_m)
-        model.train()
-        for bi in batches(len(tr_i), args.batch):
-            opt.zero_grad()
-            logit = model(tam[bi], tbm[bi], mp_tr[bi], mo_tr[bi])
-            loss = (bce(logit, y_tr[bi]) * wt_tr[bi]).mean()
-            loss.backward()
-            opt.step()
-        model.eval()
-        with torch.no_grad():
-            pv_mix = torch.sigmoid(model(tam_v, tbm_v, mp[vai], mo[vai])).numpy()
-            pv_full = torch.sigmoid(model(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
-        vll = log_loss(yv, pv_mix, labels=[0, 1])
-        history_mix.append(vll)
-        history_full.append(float(log_loss(yv, pv_full, labels=[0, 1])))
-        if vll < best_ll - 1e-4:
-            best_ll, bad = vll, 0
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
-        else:
-            bad += 1
-            if bad >= patience:
-                break
-
-    model.load_state_dict(best_state)
-    model.eval()
-    with torch.no_grad():
-        pv = torch.sigmoid(model(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
-        pv_mix = torch.sigmoid(model(tam_v, tbm_v, mp[vai], mo[vai])).numpy()
-    m_ll, m_auc = log_loss(yv, pv, labels=[0, 1]), roc_auc_score(yv, pv)
-    m_acc = float(((pv > 0.5) == yv.astype(bool)).mean())
-    m_ece = expected_calibration_error(pv, yv)
-    mix_ll = float(log_loss(yv, pv_mix, labels=[0, 1]))
+    # Bind the winning candidate into the names the rest of the routine (report, gate, charts) uses.
+    model = best["model"]
+    pv = best["pv"]
+    m_ll, m_auc, m_acc, m_ece = best["m_ll"], best["m_auc"], best["m_acc"], best["m_ece"]
+    mix_ll = best["mix_ll"]
+    history_mix, history_full = best["history_mix"], best["history_full"]
+    chosen_seed = best["seed"]
 
     print("\n=== validation metrics, full comps (logloss/ECE: lower better; acc/AUC: higher better) ===")
     print(f"{'model':<22}{'logloss':>10}{'acc':>8}{'AUC':>8}{'ECE':>8}")
@@ -247,16 +317,16 @@ def main() -> None:
         delta = m_ll - baseline["logloss"]
         print(f"paired full-comp delta vs prev checkpoint (same val rows): "
               f"logloss {delta:+.4f}  AUC {m_auc - baseline['auc']:+.4f}"
-              f"  — if logloss is up materially, raise --p-full and retrain")
-        # Hard gate BEFORE any artifact is written: the unattended crawler path
-        # (collect.py --retrain-on-shift) trains, exports, and publishes without a human, and
-        # this run's winprob.pt becomes the next run's baseline — an advisory print alone
-        # would let regressions ratchet in.
+              f"  — if logloss is up materially, raise --p-full or --candidates and retrain")
+        # Hard gate BEFORE any artifact is written. With best-of-N the gate judges the WINNER —
+        # if even the best of N candidates regressed past the threshold, publish nothing, so the
+        # unattended crawler path can't ratchet a regression in (this run's winprob.pt would
+        # otherwise become the next run's baseline).
         if 0 <= args.max_full_delta < delta:
             raise SystemExit(
-                f"full-comp regression gate: paired logloss delta {delta:+.4f} exceeds "
-                f"--max-full-delta {args.max_full_delta} — no artifacts written. "
-                f"Raise --p-full (more full-comp weight) and retrain.")
+                f"full-comp regression gate: best-of-{n_cand} paired logloss delta {delta:+.4f} "
+                f"exceeds --max-full-delta {args.max_full_delta} — no artifacts written. "
+                f"Raise --p-full (more full-comp weight) or --candidates (more seeds) and retrain.")
 
     # --- partial-draft states: how much is knowing more of the draft worth? ---
     # Each row masks the whole val split to one fixed (known_ours, known_theirs) state.
@@ -275,7 +345,7 @@ def main() -> None:
     print("\n=== partial draft states, val (value of knowing more of the draft) ===")
     print(f"{'state':<10}{'logloss':>10}{'AUC':>8}{'ECE':>8}{'mean|p-.5|':>12}")
     for ka, kb in ((1, 0), (1, 1), (2, 1), (2, 2), (3, 2), (3, 3)):
-        srng = np.random.default_rng(args.seed + 100 + 10 * ka + kb)
+        srng = np.random.default_rng(chosen_seed + 100 + 10 * ka + kb)
         sa_np = mask_to_known(ds.team_a[val_i], ka, cfg.mask_row, srng)
         sb_np = mask_to_known(ds.team_b[val_i], kb, cfg.mask_row, srng)
         sa, sb = torch.from_numpy(sa_np), torch.from_numpy(sb_np)
@@ -320,6 +390,13 @@ def main() -> None:
         "embedding_partial": partial_metrics,
         # Previous checkpoint scored on this run's val rows — the only drift-free comparison.
         "baseline_prev_checkpoint": baseline,
+        # Best-of-N provenance: which seed shipped and how the candidates compared (empty deltas
+        # when there was no paired baseline, e.g. after a vocabulary change).
+        "n_candidates": n_cand,
+        "chosen_seed": chosen_seed,
+        "candidates": [{"seed": c["seed"], "logloss": c["m_ll"],
+                        "delta": (c["m_ll"] - baseline["logloss"]) if baseline else None}
+                       for c in candidates],
     }
     (DOCS / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
