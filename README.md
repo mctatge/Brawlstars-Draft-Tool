@@ -123,18 +123,18 @@ See [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md) for the full methodology, trainin
 
 ## Results
 
-Held-out validation on 158,966 of 1,059,778 matches (lower log-loss/ECE is better; higher
+Held-out validation on 242,273 of 1,615,154 matches (lower log-loss/ECE is better; higher
 AUC/accuracy is better), full comps:
 
 | Model | Log-loss | Accuracy | AUC | ECE |
 | --- | --- | --- | --- | --- |
 | Always 0.5 | 0.6931 | 0.500 | – | – |
-| Logistic regression (brawler presence) | 0.6852 | 0.550 | 0.570 | – |
-| **Embedding net** | **0.6674** | **0.588** | **0.625** | **0.009** |
+| Logistic regression (brawler presence) | 0.6841 | 0.552 | 0.574 | – |
+| **Embedding net** | **0.6650** | **0.590** | **0.630** | **0.011** |
 
 And on unfinished boards, the same net's log-loss falls monotonically as picks land —
-0.6908 with one known pick, 0.6781 at 2v2, 0.6674 at the full 3v3 — with calibration
-holding near 0.01 at every state (see `docs/metrics.json`).
+0.6910 with one known pick, 0.6769 at 2v2, 0.6650 at the full 3v3 — with calibration
+holding between 0.011 and 0.014 at every state (see `docs/metrics.json`).
 
 The embedding net beats both baselines and is **well-calibrated**. The absolute AUC is modest
 *by nature of the problem*: at top ladder both teams draft competently and the outcome is

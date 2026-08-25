@@ -26,7 +26,7 @@ trained input, not a gap to fill.
   harvests the other five player tags from every ranked match to expand the frontier. Matches
   are deduped by a stable key (`battleTime` + sorted player tags), since one match appears in
   up to six players' logs.
-- **Size:** ~1.06M labeled unique ranked matches (1,059,778 at the current retrain). Each row
+- **Size:** ~1.62M labeled unique ranked matches (1,615,154 at the current retrain). Each row
   is `(map, mode, team A brawlers[3], team B brawlers[3]) → winner`. Per-brawler power level,
   Ranked tier (the API's `trophies` field), and the queue type (`soloRanked`/`teamRanked`) are
   also stored, but they are **not** model features — the tier drives bracket-stratified
@@ -140,21 +140,27 @@ about half the weight of a fresh one; the weights are normalized to mean $1$).
 
 ## Evaluation
 
-Held-out validation (158,966 of 1,059,778 matches), full comps:
+Held-out validation (242,273 of 1,615,154 matches), full comps:
 
 | Model | Log-loss ↓ | Accuracy ↑ | AUC ↑ | ECE ↓ |
 | --- | --- | --- | --- | --- |
 | Always 0.5 | 0.6931 | 0.500 | – | – |
-| Logistic regression | 0.6852 | 0.550 | 0.570 | – |
-| Previous (unmasked) checkpoint, same val rows | 0.6671 | 0.588 | 0.626 | 0.009 |
-| **Embedding net (masked, `--p-full 0.7`)** | **0.6674** | **0.588** | **0.625** | **0.009** |
+| Logistic regression | 0.6841 | 0.552 | 0.574 | – |
+| Previous checkpoint (also masked), same val rows | 0.6622 | 0.595 | 0.636 | 0.011 |
+| **Embedding net (masked, `--p-full 0.7`, best of 3 seeds)** | **0.6650** | **0.590** | **0.630** | **0.011** |
 
-- Beats both baselines; the paired full-comp delta vs the unmasked control is
-  +0.0003 log-loss / −0.0009 AUC — the price of partial-draft support, held to parity by the
-  70/30 full/masked training mixture (a 50/50 mixture cost +0.0010 with no partial-state
-  gain). Retrains enforce this as a hard gate: `train.py --max-full-delta` (default 0.002)
-  aborts without writing artifacts, so the unattended auto-retrain path can't publish or
-  baseline a regressed model.
+- Beats both baselines. The previous checkpoint wins the paired comparison by +0.0028
+  log-loss on the same val rows — inside the ~0.0035 seed-to-seed noise floor measured by
+  `gate_experiment.py` (2026-08-23), so the two are within noise of each other and the
+  retrain ships because it is fit to the current meta. The shipped net is the best of three
+  candidate seeds (`train.py --candidates 3`; paired deltas +0.0028..+0.0030, seed 2 chosen).
+  The paired delta is a hard gate: `train.py --max-full-delta` (default 0.002; the unattended
+  retrain in `collect.py` widens it to the 0.0035 noise floor) aborts without writing
+  artifacts, so the unattended auto-retrain path can't publish or baseline a regressed model.
+- The price of partial-draft support was measured once, at the 2026-08-12 switch to masked
+  training: +0.0003 log-loss / −0.0009 AUC against the last unmasked checkpoint, held to
+  parity by the 70/30 full/masked training mixture (a 50/50 mixture cost +0.0010 with no
+  partial-state gain).
 - **The gate can also lock the model in, and does so silently.** On 2026-08-20 it was found to
   have refused **38 consecutive** retrains (deltas +0.0022..+0.0031), freezing the served model
   at 2026-08-12 while `meta_report.json` kept reporting a shifted meta. Two things made it
@@ -167,25 +173,28 @@ Held-out validation (158,966 of 1,059,778 matches), full comps:
   floor (production trains on one seed, so a wide spread is a coin flip every cycle), or a real
   ratchet against an incumbent that was a lucky draw. Every trial is scored against the same
   snapshotted checkpoint and the incumbent is restored afterwards, so the experiment can't
-  replace the served model.
+  replace the served model. That experiment ran 2026-08-23 and returned the second verdict:
+  the seed-to-seed floor is ~0.0035, above the 0.002 gate. Since 2026-08-24 the unattended
+  retrain therefore trains `--candidates 3` and gates at `--max-full-delta 0.0035`; manual
+  `train.py` runs keep the strict 0.002 default.
 - **Partial draft states** (whole val split masked to each state; `mean |p−0.5|` is the
   average edge the model claims):
 
   | State (known ours v theirs) | Log-loss ↓ | AUC ↑ | ECE ↓ | mean \|p−0.5\| |
   | --- | --- | --- | --- | --- |
-  | 1v0 | 0.6908 | 0.538 | 0.010 | 0.029 |
-  | 1v1 | 0.6870 | 0.561 | 0.010 | 0.044 |
-  | 2v1 | 0.6839 | 0.576 | 0.010 | 0.058 |
-  | 2v2 | 0.6781 | 0.595 | 0.010 | 0.070 |
-  | 3v2 | 0.6742 | 0.608 | 0.013 | 0.082 |
-  | 3v3 | 0.6674 | 0.625 | 0.009 | 0.093 |
+  | 1v0 | 0.6910 | 0.538 | 0.013 | 0.034 |
+  | 1v1 | 0.6865 | 0.564 | 0.014 | 0.050 |
+  | 2v1 | 0.6828 | 0.579 | 0.013 | 0.064 |
+  | 2v2 | 0.6769 | 0.599 | 0.013 | 0.077 |
+  | 3v2 | 0.6723 | 0.612 | 0.011 | 0.088 |
+  | 3v3 | 0.6650 | 0.630 | 0.011 | 0.099 |
 
   Information about the rest of the draft is worth a steady log-loss improvement at every
-  step, and calibration holds near 0.01 across all states. At the lowest-information state
-  (1v0) the net sits at parity with a shrunk brawler-map winrate marginal (0.6908 vs 0.6905) —
+  step, and calibration holds within 0.014 across all states. At the lowest-information state
+  (1v0) the net sits at parity with a shrunk brawler-map winrate marginal (0.6910 vs 0.6906) —
   it adds nothing beyond the raw statistic there, which the blend already carries as the
   `map` signal, but it is not washed out either.
-- **Calibration is the headline:** ECE ≈ 0.009 means the predicted probabilities are
+- **Calibration is the headline:** ECE ≈ 0.011 means the predicted probabilities are
   trustworthy — when it says 60%, the team wins ~60% of the time. For an assistant that
   *consumes* probabilities, calibration matters more than raw accuracy.
 - Charts: see [`docs/training.png`](training.png) (validation curves for the masked mixture
@@ -194,7 +203,7 @@ Held-out validation (158,966 of 1,059,778 matches), full comps:
 ## Limitations
 
 - **Skill-dominated outcomes.** At top ladder both teams draft well; the *draft* explains only
-  a slice of the result, capping achievable AUC (~0.62 here on ~1M matches). The tool therefore
+  a slice of the result, capping achievable AUC (~0.63 here on ~1.6M matches). The tool therefore
   uses the model for *relative* pick ranking and fuses it with lower-variance empirical
   signals — it does not present any single absolute win-probability as gospel.
 - **Partial-draft probabilities are population averages, not adversarial worst cases.** The

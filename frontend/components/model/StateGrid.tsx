@@ -5,12 +5,12 @@ import { useState } from "react";
 // states the evaluation reports separately are listed; the other eight are trained on but not
 // broken out.
 const METRICS: Record<string, { ll: string; auc: string; ece: string; edge: string }> = {
-  "1v0": { ll: "0.6908", auc: "0.538", ece: "0.010", edge: "0.029" },
-  "1v1": { ll: "0.6870", auc: "0.561", ece: "0.010", edge: "0.044" },
-  "2v1": { ll: "0.6839", auc: "0.576", ece: "0.010", edge: "0.058" },
-  "2v2": { ll: "0.6781", auc: "0.595", ece: "0.010", edge: "0.070" },
-  "3v2": { ll: "0.6742", auc: "0.608", ece: "0.013", edge: "0.082" },
-  "3v3": { ll: "0.6674", auc: "0.625", ece: "0.009", edge: "0.093" },
+  "1v0": { ll: "0.6910", auc: "0.538", ece: "0.013", edge: "0.034" },
+  "1v1": { ll: "0.6865", auc: "0.564", ece: "0.014", edge: "0.050" },
+  "2v1": { ll: "0.6828", auc: "0.579", ece: "0.013", edge: "0.064" },
+  "2v2": { ll: "0.6769", auc: "0.599", ece: "0.013", edge: "0.077" },
+  "3v2": { ll: "0.6723", auc: "0.612", ece: "0.011", edge: "0.088" },
+  "3v3": { ll: "0.6650", auc: "0.630", ece: "0.011", edge: "0.099" },
 };
 
 type Kind = "full" | "none" | "mask";

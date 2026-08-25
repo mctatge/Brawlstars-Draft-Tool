@@ -261,7 +261,7 @@ export function TrainLoop() {
       <text className="lbl" x="300" y="224" textAnchor="middle">early stop — patience 6</text>
       <rect className="box-b" x="640" y="182" width="300" height="52"/>
       <text x="790" y="204" textAnchor="middle">val · UNMASKED full 3v3</text>
-      <text className="lbl" x="790" y="224" textAnchor="middle">gate — delta log-loss ≤ 0.002</text>
+      <text className="lbl" x="790" y="224" textAnchor="middle">gate — delta log-loss ≤ 0.0035</text>
 
       <text className="cap" x="300" y="258" textAnchor="middle">picks which epoch to keep</text>
       <text className="cap" x="790" y="258" textAnchor="middle">decides whether anything is written at all</text>
@@ -271,7 +271,7 @@ export function TrainLoop() {
 
 export function EdgeCalibration() {
   return (
-    <svg className="d" viewBox="0 0 1120 348" role="img" aria-label="As more of the draft is known, the model claims a larger edge while its calibration error stays flat near one percent.">
+    <svg className="d" viewBox="0 0 1120 348" role="img" aria-label="As more of the draft is known, the model claims a larger edge while its calibration error holds between 0.011 and 0.014.">
       <line className="ax" x1="120" y1="280" x2="1060" y2="280"/>
       <line className="ax" x1="120" y1="60" x2="120" y2="280"/>
       <line className="grid" x1="120" y1="225" x2="1060" y2="225"/>
@@ -284,28 +284,28 @@ export function EdgeCalibration() {
       <text className="tiny" x="112" y="119" textAnchor="end">.075</text>
       <text className="tiny" x="112" y="64" textAnchor="end">.100</text>
 
-      <rect className="bar" x="160.3" y="216.2" width="76" height="63.8"/>
-      <rect className="bar" x="317.0" y="183.2" width="76" height="96.8"/>
-      <rect className="bar" x="473.7" y="152.4" width="76" height="127.6"/>
-      <rect className="bar" x="630.3" y="126.0" width="76" height="154.0"/>
-      <rect className="bar" x="787.0" y="99.6" width="76" height="180.4"/>
-      <rect className="bar bar-hi" x="943.7" y="75.4" width="76" height="204.6"/>
+      <rect className="bar" x="160.3" y="204.9" width="76" height="75.1"/>
+      <rect className="bar" x="317.0" y="171.0" width="76" height="109.0"/>
+      <rect className="bar" x="473.7" y="139.1" width="76" height="140.9"/>
+      <rect className="bar" x="630.3" y="111.3" width="76" height="168.7"/>
+      <rect className="bar" x="787.0" y="86.3" width="76" height="193.7"/>
+      <rect className="bar bar-hi" x="943.7" y="62.1" width="76" height="217.9"/>
 
-      <text className="barval" x="198.3" y="208" textAnchor="middle">.029</text>
-      <text className="barval" x="355.0" y="175" textAnchor="middle">.044</text>
-      <text className="barval" x="511.7" y="144" textAnchor="middle">.058</text>
-      <text className="barval" x="668.3" y="118" textAnchor="middle">.070</text>
-      <text className="barval" x="825.0" y="91" textAnchor="middle">.082</text>
-      <text className="barval" x="981.7" y="67" textAnchor="middle">.093</text>
+      <text className="barval" x="198.3" y="197" textAnchor="middle">.034</text>
+      <text className="barval" x="355.0" y="163" textAnchor="middle">.050</text>
+      <text className="barval" x="511.7" y="131" textAnchor="middle">.064</text>
+      <text className="barval" x="668.3" y="103" textAnchor="middle">.077</text>
+      <text className="barval" x="825.0" y="78" textAnchor="middle">.088</text>
+      <text className="barval" x="981.7" y="54" textAnchor="middle">.099</text>
 
-      <polyline className="ece" points="198.3,258.0 355.0,258.0 511.7,258.0 668.3,258.0 825.0,251.4 981.7,260.2"/>
-      <circle className="dot-g" cx="198.3" cy="258.0" r="4"/><circle className="dot-g" cx="355.0" cy="258.0" r="4"/>
-      <circle className="dot-g" cx="511.7" cy="258.0" r="4"/><circle className="dot-g" cx="668.3" cy="258.0" r="4"/>
-      <circle className="dot-g" cx="825.0" cy="251.4" r="4"/><circle className="dot-g" cx="981.7" cy="260.2" r="4"/>
+      <polyline className="ece" points="198.3,252.0 355.0,250.2 511.7,252.5 668.3,251.7 825.0,254.9 981.7,254.9"/>
+      <circle className="dot-g" cx="198.3" cy="252.0" r="4"/><circle className="dot-g" cx="355.0" cy="250.2" r="4"/>
+      <circle className="dot-g" cx="511.7" cy="252.5" r="4"/><circle className="dot-g" cx="668.3" cy="251.7" r="4"/>
+      <circle className="dot-g" cx="825.0" cy="254.9" r="4"/><circle className="dot-g" cx="981.7" cy="254.9" r="4"/>
       {/* Legend sits below the state ticks: at x=600 it would otherwise blank out the 2v2 and
           3v2 labels, since .chip paints an opaque background. */}
       <rect className="chip" x="596" y="316" width="342" height="20"/>
-      <text className="tiny green-t" x="608" y="330">CALIBRATION ERROR — 0.009 TO 0.013 ACROSS STATES</text>
+      <text className="tiny green-t" x="608" y="330">CALIBRATION ERROR — 0.011 TO 0.014 ACROSS STATES</text>
 
       <text className="tiny" x="198.3" y="300" textAnchor="middle">1v0</text>
       <text className="tiny" x="355.0" y="300" textAnchor="middle">1v1</text>
