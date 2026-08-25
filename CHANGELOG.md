@@ -6,6 +6,12 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-08-24
 
+- **The MATCHES counter now shows the whole dataset.** The console's header count was reading the
+  server's in-memory stats window, which is deliberately capped at the 60,000 most recent matches
+  to fit the small cloud instance — so it sat frozen at ~59,864 and looked like data collection
+  had died. It now reports the true size of the live dataset (~1.6 million ranked matches and
+  growing), counted directly from the synced match file with no extra memory cost.
+
 - **Rank lookups can no longer take the site down — for real this time.** The 2026-08-20 fix
   (decoding the rank index in slices) bought time, not safety: the index has since grown from
   2.5 to 3.0 million players, its decode peak crept back to ~263 MB, and the server was
