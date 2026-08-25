@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent: probe the Supercell API every 10 minutes and alert LOUDLY when the
+  home IP rotates off the key's allow-list (accessDenied.invalidIp) — the failure that
+  silently kills the crawler and the roster tunnel. See backend/scripts/watchdog.py:
+  it notifies once per outage and writes data/raw/watchdog_status.json with the new
+  public IP + the exact fix (new key -> .env -> kickstart api + crawler).
+
+  1. Replace every /ABSOLUTE/PATH/TO/Brawlstars-Draft-Tool below with your repo's real path.
+  2. cp deploy/com.bsdraft.watchdog.plist ~/Library/LaunchAgents/com.bsdraft.watchdog.plist
+  3. launchctl load ~/Library/LaunchAgents/com.bsdraft.watchdog.plist     # start
+     launchctl unload ~/Library/LaunchAgents/com.bsdraft.watchdog.plist   # stop
+  4. python3 backend/scripts/watchdog.py -.-test-notify   (replace -.- with two dashes;
+     XML comments can't contain them) — fires a test banner; approve the notification
+     permission prompt (shows as osascript / Script Editor) so real alerts get through.
+
+  Runs on SYSTEM python3 with no PYTHONPATH: the script is stdlib-only by design, so
+  the watchdog keeps working even when the venv or the bsdraft install is broken.
+  StartInterval (not KeepAlive): each run is one probe + status write, then exits.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bsdraft.watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>backend/scripts/watchdog.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/ABSOLUTE/PATH/TO/Brawlstars-Draft-Tool</string>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/Brawlstars-Draft-Tool/data/raw/watchdog.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/Brawlstars-Draft-Tool/data/raw/watchdog.err.log</string>
+</dict>
+</plist>

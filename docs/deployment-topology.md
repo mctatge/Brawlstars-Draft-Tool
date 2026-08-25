@@ -8,15 +8,35 @@ live site.
 
 ## Home machine (has the key)
 
-The crawler runs on a home machine via three launchd plists under `deploy/`: crawler
-(`com.bsdraft.crawler`), API (`com.bsdraft.api`), and tunnel (`com.bsdraft.tunnel`). It
-publishes `matches.jsonl.gz` + `winprob.npz` + precomputed stats, rank-index, and
-meta-drift-report artifacts to a GitHub Release.
+The crawler runs on a home machine via four launchd plists under `deploy/`: crawler
+(`com.bsdraft.crawler`), API (`com.bsdraft.api`), tunnel (`com.bsdraft.tunnel`), and the
+IP-lockout watchdog (`com.bsdraft.watchdog`, below). It publishes `matches.jsonl.gz` +
+`winprob.npz` + precomputed stats, rank-index, and meta-drift-report artifacts to a
+GitHub Release.
 
 The crawler agent runs with `--retrain-on-shift`, so a detected meta shift auto-retrains and
 republishes the model. The one manual path left is a **new brawler**: run
 `backend/scripts/refresh_reference.py` + retrain + a commit (the reference JSONs are bundled
 into the repo).
+
+### IP-rotation watchdog (the recurring outage)
+
+Comcast rotates the home IP every 1–2 weeks (2026-07-11, 08-10, 08-13, 08-24); each
+rotation makes the IP-locked key 403 (`accessDenied.invalidIp`), which kills the crawler
+*silently* and takes down the roster tunnel — and the cloud-side keepwarm Action has never
+caught one in time. `com.bsdraft.watchdog` runs `backend/scripts/watchdog.py` every
+10 minutes (stdlib-only, on system `python3` — deliberately independent of the venv). It
+probes one cheap API endpoint with the `.env` token; on lockout it fires a macOS
+notification (once per outage, with a reminder every `WATCHDOG_REMIND_HOURS`, default 6)
+and writes `data/raw/watchdog_status.json` containing the new public IP and the exact fix:
+
+1. Mint a key allowing that IP at developer.brawlstars.com, paste it into `.env`.
+2. `launchctl kickstart -k gui/$UID/com.bsdraft.api` and `.../com.bsdraft.crawler` —
+   both hold the old token in memory until restarted (the tunnel agent has no key).
+
+The watchdog re-reads `.env` each cycle, so it confirms the fix with a one-shot
+"recovered" notification. On first install, run `python3 backend/scripts/watchdog.py
+--test-notify` once and approve the notification permission so real alerts get through.
 
 ## Cloud API (Render, no key)
 
