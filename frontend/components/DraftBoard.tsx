@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Brawler, PickRec, BanRec, Reference, RecommendResponse, Warning, RosterResponse, GamePlan, Health, Meta, RankInfo, TopPick,
   LoadoutResponse, LoadoutItem, OwnedBrawler,
-  getReference, getRoster, recommend, getHealth, getMeta, getRank, getTopPicks, getLoadout,
+  getReference, getRoster, recommend, getHealth, getMeta, getRank, getTopPicks, getLoadout, warmPersonal,
 } from "@/lib/api";
 import AdSlot from "@/components/AdSlot";
 import Logo from "@/components/Logo";
@@ -768,6 +768,19 @@ export default function DraftBoard() {
   );
   const fieldableSet = useMemo(() => new Set(fieldableOwned.map((o) => o.id)), [fieldableOwned]);
 
+  // Pre-warm the scoring backend's personal-stats cache the moment a tag resolves (boot with a
+  // saved tag, a tag change via LOAD, or a map switch — a same-tag re-LOAD doesn't move these
+  // deps, so checkRank warms directly). The first personalized pick request otherwise blocks on
+  // a full dataset scan there — the first-match-of-the-day stall — because the warm that rank
+  // resolution triggers lands on the tunnel host, not the scoring one.
+  // mapId is a deliberate dep: a new map usually means a new game, and a server-side data
+  // refresh can invalidate the cache mid-session; re-warming during the ban phase hides the
+  // rescan, and the backend no-ops when the tag is already warm or mid-scan, so repeats are
+  // near-free.
+  useEffect(() => {
+    if (personalTag) warmPersonal(personalTag);
+  }, [personalTag, mapId]);
+
   const pickSeq = useMemo(
     () => blindPick
       ? Array.from({ length: TEAM_N }, (_, index) => ({ side: "us" as const, zone: "our" as const, index }))
@@ -986,6 +999,10 @@ export default function DraftBoard() {
       if (info.found) {
         setTag(info.tag);
         localStorage.setItem("bsdraft.tag", info.tag);
+        // Warm here too, not just in the effect below: re-LOADing the SAME tag leaves personalTag
+        // (a string dep) unchanged, so the effect won't re-fire — but a server-side data refresh
+        // may have gone cold-cache since, and LOAD is a natural "about to draft" signal.
+        warmPersonal(info.tag);
       }
     } catch {
       setRankInfo({ found: false, tag: t, tier: null, tier_label: null, bracket: null, source: null, error: "lookup failed" });

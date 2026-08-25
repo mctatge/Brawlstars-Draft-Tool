@@ -215,6 +215,16 @@ export async function getRoster(tag?: string | null): Promise<RosterResponse> {
   return res.json();
 }
 
+// Fire-and-forget: ask the scoring backend to pre-build this tag's personal stats so the first
+// personalized pick doesn't block on its dataset scan. Deliberately API_BASE, not ROSTER_BASE:
+// rank resolution goes through the keyed tunnel (a different machine in production), and a warm
+// there does nothing for the host that actually scores /api/recommend. Best-effort by design —
+// failures (including a 404 from a backend that predates the endpoint) are swallowed, because
+// the pick-phase build still covers the tag lazily.
+export function warmPersonal(tag: string): void {
+  fetch(`${API_BASE}/api/warm?tag=${encodeURIComponent(tag)}`).catch(() => {});
+}
+
 export async function getTopPicks(body: TopPicksBody): Promise<TopPicksResponse> {
   const res = await fetch(`${API_BASE}/api/top_picks`, {
     method: "POST",

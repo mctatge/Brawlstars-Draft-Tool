@@ -121,13 +121,25 @@ def _rank_index() -> RankIndex:
     return _rank_idx_cache[1]
 
 
+# Supercell tags draw from a fixed 14-character alphabet. Anything outside it (or absurdly
+# short/long) cannot name a player in our data, so a dataset scan for it is pure waste — and
+# SHORT garbage is the worst case: the scan's raw-substring prefilter skips ~99.9% of lines for
+# a real tag, but a 1-2 char string appears in nearly every line, degenerating the scan to
+# json-parsing all ~1.6M matches. Both personal-stats entry points gate on this.
+_TAG_CHARS = frozenset("0289PYLQGRJCUV")
+
+
+def _plausible_tag(t: str) -> bool:
+    return 3 <= len(t) <= 14 and set(t) <= _TAG_CHARS
+
+
 def _personal_for(tag: Optional[str]):
     """Cached personal stats for ``tag``, derived from the synced dataset (key-free, so it
     works on the public host) and rebuilt when the data changes. Returns None when the tag
-    is empty or the player has no labeled games in our data. A live battle-log augment can
-    pre-seed a richer entry at startup (see lifespan), which this cache then serves."""
+    is empty or implausible, or the player has no labeled games in our data. A live battle-log
+    augment can pre-seed a richer entry at startup (see lifespan), which this cache then serves."""
     t = normalize_tag(tag or "")
-    if not t or _engine is None:
+    if not t or not _plausible_tag(t) or _engine is None:
         return None
     hit = _personal_cache.get(t)
     if hit is not None and hit[0] == _last_change:
@@ -144,10 +156,16 @@ def _personal_for(tag: Optional[str]):
         hit = _personal_cache.get(t)     # another thread may have built it while we waited
         if hit is not None and hit[0] == _last_change:
             return hit[1]
-        if len(_personal_cache) > 256:   # simple bound — tags are cheap to rebuild
-            _personal_cache.clear()
+        if len(_personal_cache) > 256:   # bound growth by evicting the oldest entry, not clear():
+            # a mass wipe let a batch of new tags cost every warm user their entry at once.
+            # list() snapshots atomically under the GIL, so concurrent inserts can't trip the pop.
+            _personal_cache.pop(next(iter(list(_personal_cache)), ""), None)
+        version = _last_change   # stamp the version the scan STARTED under: if a data refresh
+        # lands mid-scan we read the pre-refresh file to the end (the open handle keeps the old
+        # inode), so stamping the post-scan version would serve those stale stats as current for
+        # a whole data epoch. With the start version, the entry is born stale and rebuilt on use.
         ps = build_personal_stats(t, fallback=_engine.stats)
-        _personal_cache[t] = (_last_change, ps)
+        _personal_cache[t] = (version, ps)
         return ps
 
 
@@ -174,7 +192,17 @@ def _warm_personal(tag: Optional[str]) -> None:
     (the pick-phase build still covers the tag lazily) rather than piling scan threads onto the
     free tier — the whole point of warming is to save latency, never to risk the box."""
     t = normalize_tag(tag or "")
-    if not t or _engine is None or _personal_cache.get(t, (None,))[0] == _last_change:
+    if (not t or not _plausible_tag(t) or _engine is None
+            or _personal_cache.get(t, (None,))[0] == _last_change):
+        return
+    # A build already in flight for this tag is invisible to the cache check above (the cache is
+    # written only when the scan finishes), and a warm thread that joins it would just park on the
+    # per-tag lock while HOLDING a pool slot — two back-to-back pings for one tag (boot resolves
+    # the tag, then the map lands) could pin the whole pool doing no work. Skip instead: best
+    # effort, and the single-flight lock already guarantees the result.
+    with _personal_locks_guard:
+        lock = _personal_locks.get(t)
+    if lock is not None and lock.locked():
         return
     if not _warm_slots.acquire(blocking=False):
         return  # warm pool full — skip; the pick-phase build covers this tag lazily on a miss
@@ -568,8 +596,9 @@ async def rank(tag: str):
         if status in ("ok", "unplaced"):
             # The player just entered their tag (LOAD) — warm this tag's personal stats now, in the
             # background, so a personalized seat's first pick doesn't block on the scan later (see
-            # _warm_personal). Only for Mythic+, the one bracket range the client personalizes per
-            # seat: below it there's no seat to personalize, so the scan would be wasted work.
+            # _warm_personal). Only helps when this host also serves /api/recommend (local / the
+            # home stack): in production, rank resolves through the keyed roster tunnel while
+            # recommends are scored elsewhere, so the client warms that host via /api/warm instead.
             if is_mythic_plus(live.tier):
                 _warm_personal(tag_n)
             return live
@@ -587,6 +616,27 @@ async def rank(tag: str):
         found=False, tag=tag_n,
         error="no recent ranked games found" if settings.brawlstars_api_token
         else "not in our data, and live lookup isn't available here")
+
+
+@app.get("/api/warm")
+async def warm(tag: str):
+    """Pre-build a tag's personal stats in the background, so the first personalized recommend
+    doesn't block on the dataset scan. Exists because the warm that /api/rank fires can land on
+    the wrong machine: in production the client resolves rank through the keyed roster tunnel
+    (the home host), while /api/recommend is scored here — so the tunnel's cache got warmed and
+    this host's stayed cold, and the day's first personalized pick paid the full matches.jsonl
+    scan in-request. The client pings this endpoint (on the scoring host) whenever a tag
+    resolves and again on each map switch, so a data-refresh cache invalidation mid-session is
+    also re-warmed before the next draft's pick phase.
+
+    No Mythic+ gate, unlike the /api/rank warm: blind-pick brackets send ``personal_tag`` too
+    (the dual-column personal rail), so any resolvable tag is worth warming. Always returns
+    immediately — a full warm pool, unknown tag, or unbooted engine just means the pick-phase
+    build covers it lazily, exactly as before. Unauthenticated, so bounded twice: implausible
+    tags (wrong length/alphabet — see ``_plausible_tag``) are dropped before spending anything,
+    and at most ``_WARM_MAX_CONCURRENCY`` scans run in flight; extra requests no-op."""
+    _warm_personal(normalize_tag(tag))
+    return {"ok": True}
 
 
 @app.post("/api/top_picks", response_model=S.TopPicksResponse)

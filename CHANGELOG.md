@@ -4,6 +4,16 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-08-25
+
+- **The day's first personalized pick no longer stalls.** With a saved tag, opening the site
+  now pre-warms your personal win-rate stats on the server that scores recommendations, so
+  they're ready by the time you reach your first pick. Previously that warm-up ran on the
+  wrong machine (the roster lookup host), and the first personalized pick of a session paid a
+  full dataset scan — the long "analyzing…" on match one. The warm also re-fires when you
+  switch maps, so a mid-session data refresh gets absorbed during the ban phase instead of
+  your pick.
+
 ## 2026-08-24
 
 - **Per-mode drafting guides.** A new [guides section](https://brawldraft.com/guides) with a
