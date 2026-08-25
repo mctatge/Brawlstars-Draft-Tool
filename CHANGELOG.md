@@ -6,6 +6,15 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-08-24
 
+- **Draft recommendations are back on the full dataset.** The server is meant to load a
+  precomputed stats file built from every collected match, but a rare data glitch — a battle
+  log listing the same brawler twice on one team — made that file unreadable, and the server
+  had been quietly falling back to stats built from just its most recent 60,000 matches. One
+  malformed entry no longer poisons the load, so win rates, synergies, and counters are once
+  again computed over the full ~1.6M matches (and every rank bracket, Bronze through
+  Legendary, gets its own table again). The health endpoint now also reports which stats
+  source is live, so this can never degrade silently again.
+
 - **The MATCHES counter now shows the whole dataset.** The console's header count was reading the
   server's in-memory stats window, which is deliberately capped at the 60,000 most recent matches
   to fit the small cloud instance — so it sat frozen at ~59,864 and looked like data collection

@@ -50,7 +50,13 @@ def _dict_to_table(d: dict, fallback=None) -> DraftStats:
     for name in _DICTS_2:
         setattr(s, name, defaultdict(float, {_pair(k): v for k, v in d[name].items()}))
     for name in _DICTS_S:
-        setattr(s, name, defaultdict(float, {frozenset(_pair(k)): v for k, v in d[name].items()}))
+        # A team that fielded the same brawler twice (a rare battle-log glitch) collapses its
+        # pair frozenset to a single element, which serializes without a "_". Parse however many
+        # ids are present — exactly what the in-memory build holds — instead of demanding two:
+        # one such key once made every artifact load raise, silently dropping the API to the
+        # capped 60k rebuild for weeks.
+        setattr(s, name, defaultdict(float, {frozenset(int(x) for x in k.split("_")): v
+                                             for k, v in d[name].items()}))
     return s
 
 

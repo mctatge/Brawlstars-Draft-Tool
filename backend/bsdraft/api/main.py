@@ -46,6 +46,7 @@ logger = logging.getLogger("bsdraft.api")
 
 _engine: Optional[DraftEngine] = None
 _dataset_count: int = 0    # total matches in the synced dataset (headline count; recomputed on sync change)
+_stats_source: str = ""    # "artifact" (full-dataset stats loaded) or "rebuild" (capped fallback)
 _last_check: float = 0.0   # epoch of the last sync attempt (liveness)
 _last_change: float = 0.0  # epoch of the last actual data change
 _meta_cache = None         # (data_version, MetaReport); recomputed lazily when data changes
@@ -68,12 +69,19 @@ _rank_cache: dict = {}     # normalized tag -> (fetched_at, RankResponse); short
 def _build_stats():
     """Produce ``(global_stats, {bracket: stats})``. When STATS_URL is set the API **loads** the
     precomputed stats artifact (built off-box from *all* matches, ~tens of MB, no OOM); otherwise
-    it **rebuilds** them from the synced matches, capped to STATS_MAX_MATCHES to bound peak RAM."""
+    it **rebuilds** them from the synced matches, capped to STATS_MAX_MATCHES to bound peak RAM.
+    Which path won is surfaced on /api/health as ``stats_source`` — the fallback is a graceful
+    degradation (a 60k window instead of the full dataset), and a malformed artifact once left it
+    serving silently for weeks."""
+    global _stats_source
     if settings.stats_url and sync.STATS_PATH.exists():
         try:
-            return load_stats(sync.STATS_PATH)
+            result = load_stats(sync.STATS_PATH)
+            _stats_source = "artifact"
+            return result
         except Exception as e:  # noqa: BLE001 — a corrupt/old artifact must not break startup
             logger.warning("stats load failed (%s); rebuilding from matches", e)
+    _stats_source = "rebuild"
     return build_bracketed(halflife_days=settings.stats_halflife_days,
                            max_matches=settings.stats_max_matches)
 
@@ -296,6 +304,8 @@ def health():
         "status": "ok",
         "model": bool(_engine and _engine.model and _engine.model.available),
         "matches": _dataset_count or (_engine.stats.n if _engine else 0),
+        "stats_source": _stats_source,
+        "stats_n": _engine.stats.n if _engine else 0,
         "roster": bool(_engine and _engine.roster),
         "refresh_seconds": settings.refresh_seconds if settings.data_url else 0,
         "last_check": _last_check or None,
