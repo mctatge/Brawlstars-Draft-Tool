@@ -36,6 +36,28 @@ function Prose({ text }: { text: string }) {
   );
 }
 
+// Shared by ContentPage and the hand-laid-out docs pages (the /guides section), so the nav
+// chips and the Supercell notice stay identical everywhere.
+export function DocFooter({ current }: { current: string }) {
+  return (
+    <footer className="mt-12 pt-5 border-t border-[var(--line)] text-xs text-[var(--muted)]">
+      <div className="flex flex-wrap gap-x-1 gap-y-1.5 mb-3">
+        {NAV.filter((n) => n.href !== current).map((n) => (
+          <a key={n.href} href={n.href} className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">{n.label}</a>
+        ))}
+        <a href="/privacy" className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">Privacy</a>
+      </div>
+      <p className="mono text-[10px] leading-relaxed text-[var(--dim)]">
+        This content is not affiliated with, endorsed, sponsored, or specifically approved by Supercell and Supercell is not
+        responsible for it (
+        <a href="https://supercell.com/en/fan-content-policy/" className="underline hover:text-[var(--text)]"
+          target="_blank" rel="noopener noreferrer">Fan Content Policy</a>
+        ).
+      </p>
+    </footer>
+  );
+}
+
 export default function ContentPage({ content, current }: { content: Content; current: string }) {
   return (
     <div className="min-h-screen p-3 md:p-5 max-w-3xl mx-auto">
@@ -74,21 +96,7 @@ export default function ContentPage({ content, current }: { content: Content; cu
         ))}
       </div>
 
-      <footer className="mt-12 pt-5 border-t border-[var(--line)] text-xs text-[var(--muted)]">
-        <div className="flex flex-wrap gap-x-1 gap-y-1.5 mb-3">
-          {NAV.filter((n) => n.href !== current).map((n) => (
-            <a key={n.href} href={n.href} className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">{n.label}</a>
-          ))}
-          <a href="/privacy" className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">Privacy</a>
-        </div>
-        <p className="mono text-[10px] leading-relaxed text-[var(--dim)]">
-          This content is not affiliated with, endorsed, sponsored, or specifically approved by Supercell and Supercell is not
-          responsible for it (
-          <a href="https://supercell.com/en/fan-content-policy/" className="underline hover:text-[var(--text)]"
-            target="_blank" rel="noopener noreferrer">Fan Content Policy</a>
-          ).
-        </p>
-      </footer>
+      <DocFooter current={current} />
     </div>
   );
 }

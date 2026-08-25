@@ -6,6 +6,13 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-08-24
 
+- **Per-mode drafting guides.** A new [guides section](https://brawldraft.com/guides) with a
+  dedicated page for each of the six Ranked modes — what actually wins the mode, how to
+  structure a draft for it, who to ban, and how its competitive map catalog splits into
+  archetypes. The pages are static and patch-durable by design: they cover the principles,
+  and link to the draft board for the live, data-backed numbers. Linked from the docs nav,
+  the site footer, and the draft guide's mode section.
+
 - **Your roster lookup can no longer color anyone else's recommendations.** On the home-hosted
   API, loading a player's roster used to also store it as the server's default, so a later
   visitor who asked for personalized picks without sending their own roster could be scored
