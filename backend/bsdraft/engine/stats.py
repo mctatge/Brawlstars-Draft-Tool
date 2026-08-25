@@ -26,6 +26,7 @@ from bsdraft.engine.tiers import match_bracket
 PRIOR = 20.0                   # pseudo-games at 0.5 used for smoothing
 DEFAULT_HALFLIFE_DAYS = 21.0   # matches fade to half weight every ~3 weeks
 MIN_BRACKET_MATCHES = 300      # only build a per-bracket table above this many matches
+RECENT_WINDOW_DAYS = 3.0       # "is this map in the live rotation right now" horizon
 _DAY = 86400.0
 
 
@@ -52,31 +53,42 @@ class DraftStats:
         halflife_days: float = DEFAULT_HALFLIFE_DAYS,
         bracket: Optional[str] = None,
         fallback: Optional["DraftStats"] = None,
+        recent_anchor_ts: int = 0,
     ):
         self.n = 0
         self.halflife_days = halflife_days
         self.bracket = bracket       # if set, only matches in this rank bracket are counted
         self.fallback = fallback     # rates shrink toward this (global) table when a cell is thin
+        # Anchor for the recent window. 0 = this table's own newest match. A bracket table must
+        # be handed the DATASET's newest ts instead: a thin bracket's own newest match can be
+        # days old, and self-anchoring would report its pre-flip rotation as currently live.
+        self.recent_anchor_ts = recent_anchor_ts
+        self.ts_max = 0              # newest match ts seen by this table's build (0 = none)
         self.b_games: dict = defaultdict(float)
         self.b_wins: dict = defaultdict(float)
         self.bm_games: dict = defaultdict(float)   # (map_id, brawler)
         self.bm_wins: dict = defaultdict(float)
         self.map_games: dict = defaultdict(float)
+        # Raw (unweighted) games per map within RECENT_WINDOW_DAYS of the newest match: the
+        # rotation-liveness signal. `map_games` answers "how much does the model know about this
+        # map" (slow, 21-day half-life); this answers "is it queueable right now" (a rotation
+        # flip empties/fills it within the window). Anchored to the newest match, not the wall
+        # clock, so a stalled crawl freezes the live set instead of draining it.
+        self.map_games_recent: dict = defaultdict(float)
         self.syn_games: dict = defaultdict(float)  # frozenset{b1, b2}
         self.syn_wins: dict = defaultdict(float)
         self.cnt_games: dict = defaultdict(float)  # (attacker, defender)
         self.cnt_wins: dict = defaultdict(float)
         self._build(matches if matches is not None else iter_matches())
 
-    def _recency_weights(self, rows: List[dict]) -> List[float]:
+    def _recency_weights(self, tss: List[int]) -> List[float]:
         """``0.5 ** (age / half_life)`` per match, age measured from the newest match. Falls
         back to uniform weights when decay is disabled or timestamps are unavailable."""
         if self.halflife_days <= 0:
-            return [1.0] * len(rows)
-        tss = [int(r.get("ts") or 0) for r in rows]
+            return [1.0] * len(tss)
         tmax = max(tss, default=0)
         if tmax <= 0:
-            return [1.0] * len(rows)
+            return [1.0] * len(tss)
         half = self.halflife_days * _DAY
         return [0.5 ** ((tmax - ts) / half) for ts in tss]
 
@@ -84,13 +96,19 @@ class DraftStats:
         rows = [r for r in matches if r.get("a_won") is not None]
         if self.bracket is not None:
             rows = [r for r in rows if match_bracket(r) == self.bracket]
-        for r, w in zip(rows, self._recency_weights(rows)):
+        tss = [int(r.get("ts") or 0) for r in rows]
+        self.ts_max = max(tss, default=0)
+        anchor = self.recent_anchor_ts or self.ts_max
+        recent_min = anchor - RECENT_WINDOW_DAYS * _DAY
+        for r, w, ts in zip(rows, self._recency_weights(tss), tss):
             won = r["a_won"]
             a = [p["brawler_id"] for p in r["team_a"]]
             b = [p["brawler_id"] for p in r["team_b"]]
             mid = r.get("map_id")
             self.n += 1
             self.map_games[mid] += w
+            if anchor > 0 and ts >= recent_min:  # a timestamp-less row can't claim liveness
+                self.map_games_recent[mid] += 1.0
             for team, win in ((a, won), (b, not won)):
                 for x in team:
                     self.b_games[x] += w
@@ -167,7 +185,8 @@ def build_bracketed(
     global_stats = DraftStats(rows, halflife_days=halflife_days)
     counts = Counter(b for b in (match_bracket(r) for r in rows if r.get("a_won") is not None) if b)
     brackets = {
-        bk: DraftStats(rows, halflife_days=halflife_days, bracket=bk, fallback=global_stats)
+        bk: DraftStats(rows, halflife_days=halflife_days, bracket=bk, fallback=global_stats,
+                       recent_anchor_ts=global_stats.ts_max)
         for bk, c in counts.items() if c >= min_matches
     }
     return global_stats, brackets

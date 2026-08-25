@@ -6,6 +6,24 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-08-25
 
+- **A data refresh landing mid-draft no longer stalls your next pick.** The server syncs
+  fresh match data every 10 minutes, and that used to invalidate your warmed personal
+  win-rate stats on the spot — if it happened during your draft, the next pick on your seat
+  rebuilt them inline with a full dataset scan (~26 s of "analyzing…" measured live). The
+  scorer now serves the just-invalidated stats immediately — ten minutes of global data
+  barely moves one player's record — and rebuilds them in the background, so the stall is
+  gone from every path except a tag's very first scan, which the pre-warm below already
+  covers.
+
+- **Maps added to the Ranked rotation now appear the same day.** When today's flip added
+  Beach Ball and Pinhole Punt to the Brawl Ball pool (~18:00 UTC), the board's map list
+  would have hidden them for 2–3 days: it only showed maps with a meaningful share of
+  collected games, and a just-added map starts from zero. The list now keys off games seen
+  in the last 3 days of battle time — a new map surfaces after a few hours of crawling, and
+  a map dropped from the rotation leaves within days instead of weeks. If the recent signal
+  is missing or too thin (say, after a crawler outage), the old share-of-games cut still
+  applies, so the list never goes empty.
+
 - **The day's first personalized pick no longer stalls.** With a saved tag, opening the site
   now pre-warms your personal win-rate stats on the server that scores recommendations, so
   they're ready by the time you reach your first pick. Previously that warm-up ran on the

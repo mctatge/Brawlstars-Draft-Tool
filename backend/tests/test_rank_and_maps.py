@@ -98,9 +98,9 @@ def test_blank_tag_is_a_prompt_not_an_error(monkeypatch):
 
 # --------------------------------------------------------------------------- ranked map list
 
-def _engine_with_map_games(map_games):
+def _engine_with_map_games(map_games, recent=None):
     return types.SimpleNamespace(
-        stats=types.SimpleNamespace(map_games=map_games),
+        stats=types.SimpleNamespace(map_games=map_games, map_games_recent=recent or {}),
         bracket_stats={},
         roster=None,
     )
@@ -163,6 +163,136 @@ def test_the_cut_is_per_mode_not_global(monkeypatch):
     monkeypatch.setattr(M, "_engine", _engine_with_map_games(games))
     served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
     assert served == set(games)      # the quiet mode keeps its whole rotation
+
+
+def test_a_map_added_mid_rotation_appears_on_the_recent_signal(monkeypatch):
+    # The 2026-08-25 flip: Brawl Ball gained Beach Ball + Pinhole Punt at ~18:00 UTC. Their
+    # cumulative games were ~0.03% of the leader's 24k — the cumulative cut alone would hide
+    # them for days — but a few hours of crawl already fills the recent window.
+    by_mode = {}
+    for m in R.load_ranked_maps():
+        by_mode.setdefault(m.mode, []).append(m)
+    mode = next(k for k, v in by_mode.items() if len(v) >= 6)
+    old, added = by_mode[mode][:5], by_mode[mode][5]
+    games = {m.id: 24000 for m in old}
+    games[added.id] = 40                                  # hours old: nothing accumulated yet
+    recent = {m.id: 5000 for m in old}
+    recent[added.id] = 300                                # ~6% of the window leader — ramping
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert added.id in served
+    assert {m.id for m in old} <= served
+
+
+def test_a_map_dropped_from_rotation_leaves_with_the_window(monkeypatch):
+    # The reverse direction: a dropped map keeps a large cumulative residue (half-life 21 days —
+    # ~8 weeks to decay below the cumulative cut) but its recent window empties within days.
+    by_mode = {}
+    for m in R.load_ranked_maps():
+        by_mode.setdefault(m.mode, []).append(m)
+    mode = next(k for k, v in by_mode.items() if len(v) >= 5)
+    live, dropped = by_mode[mode][:4], by_mode[mode][4]
+    games = {m.id: 20000 for m in live}
+    games[dropped.id] = 18000                             # still ~90% of the leader cumulatively
+    recent = {m.id: 5000 for m in live}
+    recent[dropped.id] = 12                               # under the absolute floor: gone
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert dropped.id not in served
+    assert served >= {m.id for m in live}
+
+
+def test_a_too_thin_recent_window_falls_back_to_the_cumulative_cut(monkeypatch):
+    # After a crawl outage longer than the window, the window restarts from empty for every map
+    # at once. That means "no liveness signal", not "no rotation" — a mode whose window leader
+    # is under the trust floor must fall back to the cumulative cut, not serve a thinned list.
+    by_mode = {}
+    for m in R.load_ranked_maps():
+        by_mode.setdefault(m.mode, []).append(m)
+    mode = next(k for k, v in by_mode.items() if len(v) >= 4)
+    pool = by_mode[mode][:4]
+    games = {m.id: 2000 for m in pool}
+    recent = {m.id: 3 for m in pool}                      # far under the trust floor
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert served >= {m.id for m in pool}
+
+
+def test_a_partially_refilled_window_does_not_prune_live_maps(monkeypatch):
+    # The transient right after an outage: the window is refilling and per-map counts sit in
+    # the Poisson noise band, so one live map can clear a naive floor while its same-rate peers
+    # straggle under it. The whole window is untrustworthy until its leader clears the trust
+    # floor — the mode must serve the cumulative list, never a randomly thinned one.
+    by_mode = {}
+    for m in R.load_ranked_maps():
+        by_mode.setdefault(m.mode, []).append(m)
+    mode = next(k for k, v in by_mode.items() if len(v) >= 5)
+    pool = by_mode[mode][:5]
+    games = {m.id: 2000 for m in pool}                    # cumulative parity: all live
+    recent = {pool[0].id: 30, pool[1].id: 13, pool[2].id: 11, pool[3].id: 10, pool[4].id: 8}
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert served >= {m.id for m in pool}
+
+
+def test_the_share_term_prunes_a_sub_share_map_in_a_trusted_window(monkeypatch):
+    # Pins the share component of the recent cut: in a trusted window, a map above the absolute
+    # floor but under the share-of-leader threshold is dropped, and its cumulative residue does
+    # not rescue it (a trusted window overrides the cumulative signal for its whole mode).
+    by_mode = {}
+    for m in R.load_ranked_maps():
+        by_mode.setdefault(m.mode, []).append(m)
+    mode = next(k for k, v in by_mode.items() if len(v) >= 5)
+    live, fading = by_mode[mode][:4], by_mode[mode][4]
+    games = {m.id: 20000 for m in live}
+    games[fading.id] = 20000
+    recent = {m.id: 5000 for m in live}
+    recent[fading.id] = 60      # above the 25 floor, under 0.02 * 5000 = 100
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert fading.id not in served
+    assert served >= {m.id for m in live}
+
+
+def test_the_absolute_floor_holds_when_the_share_term_rounds_low(monkeypatch):
+    # Pins the floor component: with a trusted-but-modest leader the share term drops below the
+    # floor (0.02 * 600 = 12 < 25), and the floor is what separates a live map from stray noise.
+    by_mode = {}
+    for m in R.load_ranked_maps():
+        by_mode.setdefault(m.mode, []).append(m)
+    mode = next(k for k, v in by_mode.items() if len(v) >= 5)
+    pool, stray = by_mode[mode][:4], by_mode[mode][4]
+    games = {m.id: 2000 for m in pool}
+    games[stray.id] = 2000
+    recent = {m.id: 600 for m in pool}
+    recent[stray.id] = 20       # over the share term (12), under the floor (25)
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert stray.id not in served
+    assert served >= {m.id for m in pool}
+
+
+def test_recent_and_fallback_modes_coexist_in_one_response(monkeypatch):
+    # A rotation flip only touched one mode (2026-08-25: Brawl Ball). That mode reads from its
+    # trusted window — including the just-added map — while a mode with no window signal at all
+    # keeps serving its cumulative list, in the same request.
+    by_mode = {}
+    for m in R.load_ranked_maps():
+        by_mode.setdefault(m.mode, []).append(m)
+    modes = [k for k, v in by_mode.items() if len(v) >= 6]
+    flip_mode, quiet_mode = modes[0], modes[1]
+    flip_old, flip_new = by_mode[flip_mode][:5], by_mode[flip_mode][5]
+    quiet_pool = by_mode[quiet_mode][:4]
+    games = {m.id: 24000 for m in flip_old}
+    games[flip_new.id] = 40
+    games.update({m.id: 2000 for m in quiet_pool})
+    recent = {m.id: 5000 for m in flip_old}
+    recent[flip_new.id] = 300
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert flip_new.id in served
+    assert served >= {m.id for m in flip_old}
+    assert served >= {m.id for m in quiet_pool}
 
 
 def test_reference_falls_back_to_the_full_catalog_before_stats_load(monkeypatch):

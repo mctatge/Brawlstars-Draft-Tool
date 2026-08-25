@@ -141,3 +141,79 @@ def test_an_already_warm_tag_is_not_rebuilt(monkeypatch):
 def test_missing_tag_param_is_rejected(monkeypatch):
     c = _reset(monkeypatch, lambda *a, **kw: None)
     assert c.get("/api/warm").status_code == 422
+
+
+# ---- serve-stale-while-revalidate (_personal_for) --------------------------------------------
+# The refresh loop bumps _last_change whenever a dataset sync lands — including mid-draft, when
+# no client warm ping is coming (those only fire on tag/map changes). Rebuilding inline there
+# stalled the next pick request on the full dataset scan (~26 s live, 2026-08-25). The contract:
+# a stale entry is served as-is, and the rebuild happens in the background.
+
+
+def test_a_stale_entry_is_served_immediately_and_revalidated_in_background(monkeypatch):
+    # The stub build BLOCKS until the gate opens, and the gate only opens after _personal_for
+    # has returned — so a regression back to an inline rebuild deadlocks the call and fails
+    # on the 5s gate timeout instead of passing on a fast stub.
+    gate = threading.Event()
+    started = threading.Event()
+
+    def build(tag, fallback=None, **kw):
+        started.set()
+        assert gate.wait(5), "build ran in-request: the gate only opens after _personal_for returns"
+        return "fresh-stats"
+
+    _reset(monkeypatch, build)
+    key = M.normalize_tag(TAG)
+    M._personal_cache[key] = (M._last_change - 1, "stale-stats")   # entry from a prior data epoch
+    try:
+        assert M._personal_for(TAG) == "stale-stats"   # served as-is, no waiting on the scan
+        assert M._personal_cache[key][1] == "stale-stats"   # rebuild hasn't landed yet
+        assert _wait_for(started.is_set), "no background revalidation was kicked off"
+    finally:
+        gate.set()   # unblock the scan thread even on assertion failure
+    assert _wait_for(lambda: M._personal_cache[key] == (M._last_change, "fresh-stats")), \
+        "revalidation never refreshed the cache entry"
+
+
+def test_repeated_stale_reads_share_one_revalidation_scan(monkeypatch):
+    # Every pick request during the ~seconds-long rebuild re-enters the stale branch. The
+    # in-flight check in _warm_personal must make those no-ops: one scan total, and each
+    # read still gets the stale entry immediately.
+    gate = threading.Event()
+    calls = []
+
+    def build(tag, fallback=None, **kw):
+        calls.append(tag)
+        gate.wait(5)
+        return "fresh-stats"
+
+    _reset(monkeypatch, build)
+    key = M.normalize_tag(TAG)
+    M._personal_cache[key] = (M._last_change - 1, "stale-stats")
+    try:
+        for _ in range(3):
+            assert M._personal_for(TAG) == "stale-stats"
+        assert _wait_for(lambda: M._personal_locks.get(key) is not None
+                         and M._personal_locks[key].locked()), "revalidation scan never started"
+        assert M._personal_for(TAG) == "stale-stats"   # scan in flight — still served stale
+    finally:
+        gate.set()
+    assert _wait_for(lambda: M._personal_cache[key][1] == "fresh-stats")
+    assert calls == [key], "stale reads stacked redundant scans"
+
+
+def test_a_never_seen_tag_still_builds_inline(monkeypatch):
+    # Serve-stale needs something to serve: with no cache entry at all there's no better
+    # answer than the scan, so the miss path stays synchronous (the /api/warm ping on LOAD
+    # exists to make this case rare).
+    calls = []
+
+    def build(tag, fallback=None, **kw):
+        calls.append(tag)
+        return "built-inline"
+
+    _reset(monkeypatch, build)
+    key = M.normalize_tag(TAG)
+    assert M._personal_for(TAG) == "built-inline"      # returned synchronously
+    assert M._personal_cache[key] == (M._last_change, "built-inline")
+    assert calls == [key]

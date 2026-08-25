@@ -19,6 +19,14 @@ republishes the model. The one manual path left is a **new brawler**: run
 `backend/scripts/refresh_reference.py` + retrain + a commit (the reference JSONs are bundled
 into the repo).
 
+**Code changes to artifact builders stay dark until the crawler restarts.** The long-lived
+`com.bsdraft.crawler` process imports the build modules lazily and caches them, so after
+editing anything an artifact build imports (`engine/stats.py`, `stats_store.py`, exporters),
+its hourly publishes keep the OLD format until a `launchctl kickstart -k
+gui/$UID/com.bsdraft.crawler` — and an old process's next cycle silently overwrites a
+manually published new-format artifact. Restart the crawler as part of shipping any such
+change (observed 2026-08-25 with the `map_games_recent` rotation-liveness table).
+
 ### IP-rotation watchdog (the recurring outage)
 
 Comcast rotates the home IP every 1–2 weeks (2026-07-11, 08-10, 08-13, 08-24); each

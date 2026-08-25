@@ -63,6 +63,22 @@ _ROSTER_CACHE_MAX = 256    # hard bound so distinct tags can't grow the cache wi
 # separates them; 0.15 leans toward keeping a map that is merely quiet.
 MIN_SHARE_OF_MODE_LEADER = 0.15
 
+# The recent-window (rotation-liveness) cut, used for a mode only when its window leader clears
+# the trust floor. A retired map draws exactly ZERO ranked games post-flip (measured 2026-08-25:
+# 1-2 stray rows per map per 6 days), so the share term buys no readmission protection — it only
+# delays a just-added map's appearance while it ramps from zero. 0.02 of a ~5k steady-state
+# leader is ~100 games, a few hours of crawl; the 25-game floor is what actually separates live
+# from stray when the share term rounds low. The trust floor exists because a thin window can't
+# tell live from straggler: right after a >RECENT_WINDOW_DAYS outage the window restarts from
+# empty, and while per-map counts sit in the Poisson noise band (~1-30) a leader-relative cut
+# would prune live maps that a fuller window keeps. Below it the mode falls back to the
+# cumulative cut above — after an outage that's exactly the right guess (the pre-outage
+# rotation). At the floor itself (leader = 500) same-rate live maps sit ~440+, far above both
+# thresholds, so the gate never bites in a healthy window.
+RECENT_MIN_SHARE_OF_MODE_LEADER = 0.02
+RECENT_MIN_GAMES = 25.0
+RECENT_TRUST_MIN_LEADER = 500.0
+
 _rank_cache: dict = {}     # normalized tag -> (fetched_at, RankResponse); short TTL on live rank lookups
 
 
@@ -135,19 +151,35 @@ def _plausible_tag(t: str) -> bool:
 
 def _personal_for(tag: Optional[str]):
     """Cached personal stats for ``tag``, derived from the synced dataset (key-free, so it
-    works on the public host) and rebuilt when the data changes. Returns None when the tag
-    is empty or implausible, or the player has no labeled games in our data. A live battle-log
-    augment can pre-seed a richer entry at startup (see lifespan), which this cache then serves."""
+    works on the public host). Returns None when the tag is empty or implausible, or the
+    player has no labeled games in our data. A live battle-log augment can pre-seed a richer
+    entry at startup (see lifespan), which this cache then serves.
+
+    A cached entry whose data version is behind is served AS-IS while a background rebuild
+    refreshes it (stale-while-revalidate). The refresh loop bumps ``_last_change`` every time
+    a dataset sync lands, which can happen mid-draft — and the client's /api/warm pings only
+    fire on tag/map changes, so nothing re-warms an invalidated tag until its next pick
+    request. Rebuilding inline there stalled that pick on the full dataset scan (~26 s on the
+    free tier, measured 2026-08-25); one refresh epoch of global data barely moves a single
+    player's record, so the stale entry is the better answer. Only a tag with no entry at
+    all — never scanned since boot — still builds inline."""
     t = normalize_tag(tag or "")
     if not t or not _plausible_tag(t) or _engine is None:
         return None
     hit = _personal_cache.get(t)
-    if hit is not None and hit[0] == _last_change:
+    if hit is not None:
+        if hit[0] != _last_change:
+            _warm_personal(t)   # revalidate off the critical path; serve the stale entry now
         return hit[1]
-    # Building scans the dataset for this tag's games (seconds on the full cloud dataset). Single-
-    # flight per tag so a burst of requests for the same uncached tag — rapid picks, the frontend
-    # re-polling, multiple tabs — waits on one build instead of each launching its own redundant
-    # scan (a cache stampede; the cache is only written once the scan finishes).
+    return _rebuild_personal(t)
+
+
+def _rebuild_personal(t: str):
+    """Build ``t``'s cache entry from the dataset, blocking until done, and return the stats.
+    ``t`` must already be normalized and plausible, with the engine booted. Single-flight per
+    tag: a burst of builds for the same tag — rapid picks, the frontend re-polling, multiple
+    tabs, a warm racing a real request — waits on one scan instead of each launching its own
+    redundant one (a cache stampede; the cache is only written once the scan finishes)."""
     with _personal_locks_guard:
         if len(_personal_locks) > 512:   # bound growth — one tiny Lock per unique tag
             _personal_locks.clear()
@@ -185,8 +217,10 @@ def _warm_personal(tag: Optional[str]) -> None:
     the pick phase (see the recommend handler), so a personalized seat's *first* pick would block
     on it — the "analyzing…" stall. We know the tag much earlier: it's resolved when the player
     hits LOAD (``/api/rank``). Warming here means the scan runs during the ban phase and the pick-1
-    request hits the warm cache. The single-flight lock in ``_personal_for`` makes a concurrent
-    warm + real request share one scan, so this never doubles the work.
+    request hits the warm cache. The single-flight lock in ``_rebuild_personal`` makes a
+    concurrent warm + real request share one scan, so this never doubles the work.
+    ``_personal_for`` also fires this when it serves a stale entry, so a data refresh landing
+    mid-draft revalidates in the background instead of stalling the next pick request.
 
     Bounded to ``_WARM_MAX_CONCURRENCY`` in-flight warms: when the pool is full this skips the warm
     (the pick-phase build still covers the tag lazily) rather than piling scan threads onto the
@@ -209,7 +243,9 @@ def _warm_personal(tag: Optional[str]) -> None:
 
     def _run() -> None:
         try:
-            _personal_for(t)
+            # Straight to the blocking build — going through _personal_for would hit its
+            # serve-stale branch and re-kick this warm instead of ever rebuilding.
+            _rebuild_personal(t)
         finally:
             _warm_slots.release()
 
@@ -393,23 +429,36 @@ def reference():
     # model's pinned map vocabulary (`encoders.py`, `export_model.py`), where dropping entries
     # would shift every embedding row out from under the trained checkpoint.
     #
-    # The cost of a relative cut is that a map added mid-rotation stays hidden until it has
-    # accumulated its share of games. That is the right way to be wrong here: a map we have
-    # barely seen is one the model has nothing to say about either.
+    # Two signals, per mode. The recent window (`map_games_recent`, last RECENT_WINDOW_DAYS of
+    # battle time) is the primary one: a map added mid-season starts filling it immediately and
+    # crosses the cut after a few hours of crawl — same-day, where the cumulative cut needed
+    # ~2-3 days (2026-08-25: Brawl Ball gained Beach Ball + Pinhole Punt at ~18:00 UTC) — and a
+    # dropped map drains out of it within the window's ~3 days instead of decaying below the
+    # cumulative threshold over ~8 weeks. The cumulative share cut is the fallback for when the
+    # recent signal is absent (pre-2026-08-25 artifact) or the mode's window is too thin to
+    # trust (post-outage refill — see RECENT_TRUST_MIN_LEADER): the cumulative stats span more
+    # history than one rotation, so "any games at all" would readmit retirees' decaying residue —
+    # the separation there is per-mode and enormous (2026-08-20: Heist ran four maps at
+    # 1954-2026 games with retired Pit Stop on 90). Both cuts are shares of the mode's leader,
+    # not absolute counts, so the thresholds ride the crawl's volume instead of needing a retune
+    # every time the dataset grows.
     all_maps = R.load_ranked_maps()
-    games = {m.id: (_engine.stats.map_games.get(m.id, 0) if _engine else 0) for m in all_maps}
-    # "Has any games at all" is too weak a cut: the stats span more history than one rotation, so
-    # a map retired seasons ago keeps a decaying residue and drifts back into the list. The real
-    # separation is per-mode and enormous — every map in the live rotation sits within ~8% of its
-    # mode's busiest map, while a retiree sits 20x below it (2026-08-20: Heist ran four maps at
-    # 1954-2026 games with Pit Stop on 90, Brawl Ball four at 2059-2183 with Spiraling Out on 71).
-    # Cut on a share of the mode's leader, not an absolute count, so the threshold rides the
-    # crawl's volume instead of needing a retune every time the dataset grows.
-    top_per_mode = {}
-    for m in all_maps:
-        top_per_mode[m.mode] = max(top_per_mode.get(m.mode, 0), games[m.id])
-    played = [m for m in all_maps
-              if games[m.id] >= max(1, MIN_SHARE_OF_MODE_LEADER * top_per_mode[m.mode])]
+    stats = _engine.stats if _engine else None
+    games = {m.id: (stats.map_games.get(m.id, 0) if stats else 0) for m in all_maps}
+    recent = {m.id: (stats.map_games_recent.get(m.id, 0) if stats else 0) for m in all_maps}
+    by_mode: dict = {}
+    for m in all_maps:  # all_maps is (mode, name)-sorted, so grouping preserves display order
+        by_mode.setdefault(m.mode, []).append(m)
+    played = []
+    for mode_maps in by_mode.values():
+        top_recent = max(recent[m.id] for m in mode_maps)
+        if top_recent >= RECENT_TRUST_MIN_LEADER:
+            thr = max(RECENT_MIN_GAMES, RECENT_MIN_SHARE_OF_MODE_LEADER * top_recent)
+            played.extend(m for m in mode_maps if recent[m.id] >= thr)
+            continue
+        top = max(games[m.id] for m in mode_maps)
+        played.extend(m for m in mode_maps
+                      if games[m.id] >= max(1, MIN_SHARE_OF_MODE_LEADER * top))
     maps = [
         S.MapRef(id=m.id, name=m.name, mode=m.mode, image_url=m.image_url,
                  games=int(_engine.stats.map_games.get(m.id, 0)) if _engine else 0)

@@ -21,6 +21,11 @@ from bsdraft.engine.stats import DraftStats
 
 FORMAT_VERSION = 1
 _DICTS_1 = ("b_games", "b_wins", "map_games")                # int key
+# Int-keyed tables absent from artifacts published before they existed: the loader defaults
+# them empty instead of raising, so an old artifact stays loadable (empty just means "no
+# recent-window signal" and consumers fall back). Same lesson as the singleton-syn-key note
+# below — one missing/odd key must never poison the whole load.
+_DICTS_1_OPT = ("map_games_recent",)                         # int key, added 2026-08-25
 _DICTS_2 = ("bm_games", "bm_wins", "cnt_games", "cnt_wins")  # (int, int) key  -> "a_b"
 _DICTS_S = ("syn_games", "syn_wins")                         # frozenset{int,int} -> "a_b" (sorted)
 
@@ -32,7 +37,7 @@ def _pair(k: str) -> Tuple[int, int]:
 
 def _table_to_dict(s: DraftStats) -> dict:
     out: dict = {"n": s.n, "halflife_days": s.halflife_days, "bracket": s.bracket}
-    for name in _DICTS_1:
+    for name in _DICTS_1 + _DICTS_1_OPT:
         out[name] = {str(k): round(v, 6) for k, v in getattr(s, name).items()}
     for name in _DICTS_2:
         out[name] = {f"{a}_{b}": round(v, 6) for (a, b), v in getattr(s, name).items()}
@@ -47,6 +52,8 @@ def _dict_to_table(d: dict, fallback=None) -> DraftStats:
     s.n = d["n"]
     for name in _DICTS_1:
         setattr(s, name, defaultdict(float, {int(k): v for k, v in d[name].items()}))
+    for name in _DICTS_1_OPT:
+        setattr(s, name, defaultdict(float, {int(k): v for k, v in (d.get(name) or {}).items()}))
     for name in _DICTS_2:
         setattr(s, name, defaultdict(float, {_pair(k): v for k, v in d[name].items()}))
     for name in _DICTS_S:
