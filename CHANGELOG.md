@@ -6,6 +6,12 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-08-24
 
+- **Your roster lookup can no longer color anyone else's recommendations.** On the home-hosted
+  API, loading a player's roster used to also store it as the server's default, so a later
+  visitor who asked for personalized picks without sending their own roster could be scored
+  against whoever looked themselves up last. Roster lookups are now strictly read-only — the
+  only server-side fallback left is the operator's own roster, loaded once at startup.
+
 - **Draft recommendations are back on the full dataset.** The server is meant to load a
   precomputed stats file built from every collected match, but a rare data glitch — a battle
   log listing the same brawler twice on one team — made that file unreadable, and the server

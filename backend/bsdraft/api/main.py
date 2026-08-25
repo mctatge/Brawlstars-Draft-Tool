@@ -442,7 +442,12 @@ async def roster(tag: Optional[str] = None):
     try:
         async with BrawlStarsClient() as client:
             r, name = await mastery.fetch_roster(client, t)
-        _engine.roster, _engine.roster_name = r, name
+        # Deliberately do NOT write r onto _engine. This is a read endpoint, and _engine is one
+        # process-global DraftEngine shared by every request: persisting the fetched roster let
+        # whichever tag last hit /api/roster become the engine default that _roster_for() folds
+        # into /api/recommend — cross-visitor contamination the moment this host serves more
+        # than one person. The roster is returned per-request (and cached by tag below);
+        # personalization takes it explicitly via RecommendRequest.roster.
         owned = [
             S.OwnedBrawler(
                 id=bid, mastery=round(m.score, 3), gaps=m.gaps(),
@@ -662,9 +667,10 @@ def _roster_for(req: S.RecommendRequest):
 
     The server-roster fallback applies only when the ``roster`` field is *omitted* (None). An
     explicitly sent empty list means "this player fields nothing" (the client's power-floor filter
-    can empty a real roster) and must personalize against exactly that — on a multi-visitor host,
-    ``_engine.roster`` holds whichever roster ``/api/roster`` fetched *last*, so falling through
-    on ``[]`` would score one player's draft against another player's brawlers.
+    can empty a real roster) and must personalize against exactly that, never the operator's
+    roster. ``_engine.roster`` itself is only ever the operator's own, preloaded once at startup
+    from PLAYER_TAG (local/home) — ``/api/roster`` no longer writes here, so no per-request path
+    can put a visitor's roster on the shared engine.
 
     Owned brawlers below the bracket's power floor are dropped: Ranked hard-blocks selecting a
     brawler under Power 9 (through Diamond) / Power 11 (Mythic up), so recommending one the player
