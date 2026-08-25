@@ -4,6 +4,19 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-08-24
+
+- **Rank lookups can no longer take the site down — for real this time.** The 2026-08-20 fix
+  (decoding the rank index in slices) bought time, not safety: the index has since grown from
+  2.5 to 3.0 million players, its decode peak crept back to ~263 MB, and the server was
+  OOM-killed again on the 23rd. Three durable fixes ship together: the index is now published
+  as raw NumPy arrays (same ~14 MB download, but loading is ~66 MB and a third of a second —
+  essentially a memcpy, so growth no longer moves the peak); if the index somehow can't load,
+  the server now shows ranks as unknown until the next refresh instead of attempting a ~200 MB
+  in-memory rebuild (the very thing that killed it); and a request with an absurdly long player
+  tag — which quietly forced a full copy of the index per request, enough for one such request
+  to crash the server — is now answered instantly without touching it.
+
 ## 2026-08-23
 
 - **Backspace now undoes your last pick.** Press Backspace (or Delete) with the command box empty —

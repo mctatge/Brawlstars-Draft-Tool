@@ -424,3 +424,67 @@ def test_host_without_an_artifact_url_still_builds_in_memory(api, monkeypatch):
     monkeypatch.setattr(api.settings, "rank_index_url", "")
     monkeypatch.setattr(api, "build_rank_index", lambda *a, **k: {"AAA": (1, 7)})
     assert api._rank_index().get("AAA") == 7
+
+
+# ---------------------------------------------------------------------------
+# Plumbing consistency. The publisher, the sync destination, the exporter default, and the
+# RANK_INDEX_URL in render.yaml each name the artifact independently; nothing functional ties
+# them together, so a rename that misses one silently routes production onto the degraded
+# empty-index path while every unit test above stays green. Pin them to each other.
+# ---------------------------------------------------------------------------
+
+def test_rank_index_artifact_name_agrees_everywhere():
+    import re
+    from pathlib import Path
+    from bsdraft.collect import publish as P
+    from bsdraft.data import sync as SY
+    # scripts/ isn't importable as a package; read DEFAULT_OUT from the source instead.
+    repo = Path(__file__).resolve().parents[2]
+    export_src = (repo / "backend" / "scripts" / "export_rank_index.py").read_text()
+    m = re.search(r'DEFAULT_OUT\s*=\s*PROCESSED_DIR\s*/\s*"([^"]+)"', export_src)
+    assert m, "couldn't find DEFAULT_OUT in export_rank_index.py"
+    exporter_name = m.group(1)
+
+    # render.yaml has no pyyaml in requirements — regex the URL out.
+    render = (repo / "render.yaml").read_text()
+    m = re.search(r"RANK_INDEX_URL\s*\n\s*value:\s*(\S+)", render)
+    assert m, "couldn't find RANK_INDEX_URL in render.yaml"
+    url_name = m.group(1).rsplit("/", 1)[-1]
+
+    assert (P.RANK_INDEX_NPZ_PATH.name == SY.RANK_INDEX_PATH.name == exporter_name == url_name), (
+        f"artifact name split-brain: publisher={P.RANK_INDEX_NPZ_PATH.name} "
+        f"sync={SY.RANK_INDEX_PATH.name} exporter={exporter_name} url={url_name}")
+
+
+def test_npz_streams_through_sync_gzip_sniff_untouched(tmp_path, monkeypatch):
+    # _sync_file gunzips gzip-framed downloads on the fly. An npz is PK-framed, so it must land
+    # byte-identical — a refactor that decompresses unconditionally would corrupt it.
+    from bsdraft.data import sync as SY
+    src = RS.save_rank_index(_index(300), tmp_path / "rank_index.npz")
+    blob = src.read_bytes()
+
+    class _Resp:
+        status_code = 200
+        headers = {}
+        def __init__(self, content): self._c = content
+        def iter_bytes(self, chunk_size=65536):
+            for i in range(0, len(self._c), chunk_size):
+                yield self._c[i:i + chunk_size]
+        def raise_for_status(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def stream(self, method, url, **kw): return _Resp(blob)
+
+    monkeypatch.setattr(SY.httpx, "Client", _Client)
+    dest = tmp_path / "synced" / "rank_index.npz"
+    monkeypatch.setattr(SY, "RANK_INDEX_PATH", dest)
+    monkeypatch.setattr(SY, "_RANK_ETAG_PATH", tmp_path / "synced" / ".etag")
+    monkeypatch.setattr(SY, "_RANK_SHA_PATH", tmp_path / "synced" / ".sha")
+    assert SY.sync_rank_index("https://example.invalid/rank_index.npz") is True
+    assert dest.read_bytes() == blob, "sync mutated the npz bytes"
+    assert len(RS.load_rank_index(dest)) == 300

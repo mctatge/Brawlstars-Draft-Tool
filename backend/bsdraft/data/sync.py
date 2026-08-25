@@ -35,9 +35,9 @@ STATS_PATH = PROCESSED_DIR / "stats.json"
 _STATS_ETAG_PATH = PROCESSED_DIR / ".stats.etag"
 _STATS_SHA_PATH = PROCESSED_DIR / ".stats.sha"
 
-RANK_INDEX_PATH = PROCESSED_DIR / "rank_index.json"
-_RANK_ETAG_PATH = PROCESSED_DIR / ".rank_index.etag"
-_RANK_SHA_PATH = PROCESSED_DIR / ".rank_index.sha"
+RANK_INDEX_PATH = PROCESSED_DIR / "rank_index.npz"
+_RANK_ETAG_PATH = PROCESSED_DIR / ".rank_index_npz.etag"
+_RANK_SHA_PATH = PROCESSED_DIR / ".rank_index_npz.sha"
 
 META_REPORT_PATH = PROCESSED_DIR / "meta_report.json"
 _META_ETAG_PATH = PROCESSED_DIR / ".meta_report.etag"
@@ -144,10 +144,12 @@ def sync_stats(url: str, timeout: float = 60.0) -> bool:
 
 
 def sync_rank_index(url: str, timeout: float = 60.0) -> bool:
-    """Refresh the precomputed player-rank index (rank_index.json) from ``url``. Returns True iff
-    it changed, so the caller can reload it — no in-memory rebuild of the ~1.3M-entry tag->tier
-    dict from the full match dataset (~200 MB, which threatens a small instance as the data grows;
-    see :mod:`bsdraft.engine.rank_store`)."""
+    """Refresh the precomputed player-rank index (rank_index.npz) from ``url``. Returns True iff
+    it changed, so the caller can reload it — no in-memory rebuild of the ~3M-entry tag->tier
+    dict from the full match dataset (~200 MB, which OOMs a small instance; see
+    :mod:`bsdraft.engine.rank_store`). The npz passes through the gzip sniff below untouched
+    (PK-framed, like winprob.npz); the loader dispatches on content, so a legacy gzipped-JSON
+    URL still works through this same path."""
     return _sync_file(url, RANK_INDEX_PATH, _RANK_ETAG_PATH, _RANK_SHA_PATH, timeout, "rank index")
 
 

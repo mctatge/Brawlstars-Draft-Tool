@@ -44,11 +44,12 @@ class Settings(BaseSettings):
     # match dataset — so it uses *all* matches with no 512 MB OOM (the home machine builds +
     # publishes them; see scripts/export_stats.py). Unset = rebuild locally (capped, below).
     stats_url: str = ""
-    # URL of the published player-rank index (rank_index.json.gz Release asset). When set, the
-    # API LOADS the tag->Ranked-tier lookup from it (a compact NumPy-backed ~20 MB structure)
-    # instead of building a ~1.3M-entry dict (~200 MB, ~45 s) in memory from the full match
-    # dataset — which threatens the 512 MB free tier as the crawl grows. The home machine builds
-    # + publishes it (see scripts/export_rank_index.py). Unset = build locally from the matches.
+    # URL of the published player-rank index (rank_index.npz Release asset; the legacy
+    # rank_index.json.gz also loads — the loader dispatches on content). When set, the API only
+    # ever LOADS the tag->Ranked-tier lookup (~66 MB peak at 3M tags for the npz), degrading to
+    # an empty index on failure — it never falls back to building the ~3M-entry dict in memory
+    # (~200 MB, the 512 MB OOM). The home machine builds + publishes it (see
+    # scripts/export_rank_index.py). Unset = build locally from the matches (home/dev only).
     rank_index_url: str = ""
     # URL of the published meta-drift report (meta_report.json Release asset, a few KB). When
     # set, /api/meta SERVES it instead of recomputing drift over the full match dataset (two

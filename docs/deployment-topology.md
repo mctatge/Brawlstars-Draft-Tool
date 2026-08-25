@@ -29,10 +29,13 @@ The precomputed artifacts exist to fit Render's 512 MB free tier:
 
 - **Stats artifact** — lets the cloud API skip a full dataset replay at boot;
   `STATS_MAX_MATCHES` only bounds the fallback rebuild if the artifact can't load.
-- **Rank-index artifact** (`rank_index.json.gz`) — loaded into a compact NumPy `tag→tier`
-  lookup (~15 MB) instead of building the ~1.3M-entry dict (~200 MB) in RAM for `/api/rank` —
-  the standing 512 MB OOM risk as the crawl grows. Falls back to an in-memory build only if
-  the artifact can't load.
+- **Rank-index artifact** (`rank_index.npz` — the serve arrays themselves) — loaded as a
+  compact NumPy `tag→tier` lookup for `/api/rank`: ~66 MB peak / ~0.3 s at 3.0M tags, vs the
+  ~263 MB decode peak of the legacy `rank_index.json.gz` (which OOM-killed the box on
+  2026-08-23; the crawler still dual-publishes it as the rollback, and the loader reads either
+  by magic bytes). If the artifact can't load the API **serves an empty index** (ranks read as
+  unknown until the next sync) — it never falls back to the ~200 MB in-memory build, which is
+  the OOM the artifact exists to prevent.
 - **Meta-report artifact** (`meta_report.json`, a few KB, written by the crawler's per-cycle
   drift check) — what `/api/meta` serves. Recomputing drift streams the full dataset twice,
   which takes minutes on the free tier's CPU sliver and times out the frontend's meta banner.

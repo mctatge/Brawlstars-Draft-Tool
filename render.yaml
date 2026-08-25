@@ -29,11 +29,12 @@ services:
       - key: STATS_URL
         value: https://github.com/mctatge/Brawlstars-Draft-Tool/releases/download/data-latest/stats.json.gz
       # Precomputed rank index (tag -> Ranked tier), built off-box from ALL matches. When set, the
-      # API LOADS this compact (~20 MB NumPy-backed) lookup for /api/rank's dataset fallback instead
-      # of building a ~1.3M-entry dict (~200 MB, ~45 s) in memory from the full dataset — the
-      # standing OOM risk on the 512 MB free tier as the crawl grows.
+      # API LOADS this .npz (the serve arrays themselves) for /api/rank's dataset fallback:
+      # measured at 3.0M tags it's a 13.7 MB asset, ~0.3 s, ~66 MB peak — vs the ~263 MB decode
+      # peak of the legacy rank_index.json.gz (still published as the rollback: revert this URL
+      # and the loader reads it again) or the ~200 MB in-memory build neither host does anymore.
       - key: RANK_INDEX_URL
-        value: https://github.com/mctatge/Brawlstars-Draft-Tool/releases/download/data-latest/rank_index.json.gz
+        value: https://github.com/mctatge/Brawlstars-Draft-Tool/releases/download/data-latest/rank_index.npz
       # Precomputed meta-drift report (a few KB), written by the crawler each cycle. When set,
       # /api/meta SERVES it instead of recomputing drift over the full dataset — two streaming
       # passes per data change, minutes on the free tier's CPU sliver (times out the frontend's

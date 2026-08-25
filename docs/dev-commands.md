@@ -36,7 +36,7 @@ PYTHONPATH=backend python backend/scripts/collect.py --target 30000   # snowball
 PYTHONPATH=backend python backend/scripts/train.py                    # torch train → winprob.pt + docs/ charts
 PYTHONPATH=backend python backend/scripts/export_model.py             # winprob.pt → winprob.npz (commit this)
 PYTHONPATH=backend python backend/scripts/export_stats.py             # precomputed stats artifact (published next to matches.jsonl.gz)
-PYTHONPATH=backend python backend/scripts/export_rank_index.py        # precomputed tag→tier rank index (compact artifact the cloud LOADS instead of building ~200 MB in RAM)
+PYTHONPATH=backend python backend/scripts/export_rank_index.py        # precomputed tag→tier rank index (rank_index.npz; the cloud LOADS it — ~66 MB peak vs ~200 MB+ building in RAM)
 ```
 
 Other scripts under `backend/scripts/`:
