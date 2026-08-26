@@ -162,15 +162,30 @@ def _personal_for(tag: Optional[str]):
     request. Rebuilding inline there stalled that pick on the full dataset scan (~26 s on the
     free tier, measured 2026-08-25); one refresh epoch of global data barely moves a single
     player's record, so the stale entry is the better answer. Only a tag with no entry at
-    all — never scanned since boot — still builds inline."""
+    all — never scanned since boot — still builds inline.
+
+    Staleness is bounded, not open-ended: the background warm is best-effort (a full pool
+    skips it), so with nothing else this branch could serve the same aging entry forever —
+    e.g. under sustained /api/warm traffic pinning both slots. Once the entry's data version
+    lags the current one by more than ``_STALE_LAG_MAX_SECONDS`` we rebuild inline after all:
+    the deliberate staleness window is one-or-a-few 10-minute epochs, and an entry that far
+    behind means revalidation has been starved for many read attempts. (A lag that large can
+    also just mean a quiet night — no syncs between the entry's epoch and this morning's —
+    but that case is the pre-warm's job: the LOAD ping rebuilds or is mid-scan by pick time,
+    and the inline build here joins that scan via the single-flight lock.)"""
     t = normalize_tag(tag or "")
     if not t or not _plausible_tag(t) or _engine is None:
         return None
     hit = _personal_cache.get(t)
     if hit is not None:
-        if hit[0] != _last_change:
+        if hit[0] == _last_change:
+            return hit[1]
+        if _last_change - hit[0] <= _STALE_LAG_MAX_SECONDS:
             _warm_personal(t)   # revalidate off the critical path; serve the stale entry now
-        return hit[1]
+            return hit[1]
+        logger.info("personal stats for %s lag %.0fs behind — rebuilding inline "
+                    "(background revalidation starved or never covered this tag)",
+                    t, _last_change - hit[0])
     return _rebuild_personal(t)
 
 
@@ -182,7 +197,11 @@ def _rebuild_personal(t: str):
     redundant one (a cache stampede; the cache is only written once the scan finishes)."""
     with _personal_locks_guard:
         if len(_personal_locks) > 512:   # bound growth — one tiny Lock per unique tag
-            _personal_locks.clear()
+            # Drop only idle locks: wiping a HELD lock orphans it — its scan keeps running
+            # while the next request for that tag mints a fresh lock and starts a second
+            # concurrent full scan, breaking single-flight exactly when the box is busiest.
+            for k in [k for k, v in _personal_locks.items() if not v.locked()]:
+                del _personal_locks[k]
         lock = _personal_locks.setdefault(t, threading.Lock())
     with lock:
         hit = _personal_cache.get(t)     # another thread may have built it while we waited
@@ -209,6 +228,13 @@ def _rebuild_personal(t: str):
 # 2 keeps a normal LOAD warm without saturating the instance; tune if needed.
 _WARM_MAX_CONCURRENCY = 2
 _warm_slots = threading.BoundedSemaphore(_WARM_MAX_CONCURRENCY)
+_warm_inflight: set = set()  # tags with a spawned warm worker; guarded by _personal_locks_guard
+
+# How far a cached entry's data version may lag the current one before _personal_for stops
+# serving it stale and rebuilds inline. Generous on purpose: the intended stale window is a
+# 10-minute refresh epoch or a few, and the ONLY way an entry honestly lags an hour of data
+# versions is that its background revalidation kept getting skipped (warm pool starved).
+_STALE_LAG_MAX_SECONDS = 3600.0
 
 
 def _warm_personal(tag: Optional[str]) -> None:
@@ -229,17 +255,24 @@ def _warm_personal(tag: Optional[str]) -> None:
     if (not t or not _plausible_tag(t) or _engine is None
             or _personal_cache.get(t, (None,))[0] == _last_change):
         return
-    # A build already in flight for this tag is invisible to the cache check above (the cache is
-    # written only when the scan finishes), and a warm thread that joins it would just park on the
-    # per-tag lock while HOLDING a pool slot — two back-to-back pings for one tag (boot resolves
-    # the tag, then the map lands) could pin the whole pool doing no work. Skip instead: best
-    # effort, and the single-flight lock already guarantees the result.
+    # A build already in flight for this tag must not cost a second pool slot: the joining
+    # worker would just park on the per-tag lock while HOLDING it — two near-simultaneous
+    # triggers for one tag (multi-tab picks, boot + map pings) could pin the whole pool doing
+    # no work. The in-flight check has to be ATOMIC with taking the slot: `lock.locked()`
+    # alone races the window between Thread.start() and the worker actually acquiring the
+    # lock (reproduced at ~15-30% with two concurrent stale reads, 2026-08-25), so a spawned-
+    # worker registry (_warm_inflight) is written under the same guard that checks it. The
+    # locked() check stays as a best-effort catch for INLINE builds (a _rebuild_personal
+    # miss-path scan), which the registry doesn't see.
     with _personal_locks_guard:
+        if t in _warm_inflight:
+            return
         lock = _personal_locks.get(t)
-    if lock is not None and lock.locked():
-        return
-    if not _warm_slots.acquire(blocking=False):
-        return  # warm pool full — skip; the pick-phase build covers this tag lazily on a miss
+        if lock is not None and lock.locked():
+            return
+        if not _warm_slots.acquire(blocking=False):
+            return  # warm pool full — skip; the stale/miss paths cover the tag lazily
+        _warm_inflight.add(t)
 
     def _run() -> None:
         try:
@@ -247,11 +280,15 @@ def _warm_personal(tag: Optional[str]) -> None:
             # serve-stale branch and re-kick this warm instead of ever rebuilding.
             _rebuild_personal(t)
         finally:
+            with _personal_locks_guard:
+                _warm_inflight.discard(t)
             _warm_slots.release()
 
     try:
         threading.Thread(target=_run, daemon=True, name="warm-personal").start()
     except RuntimeError:      # thread table exhausted — release the slot and skip, don't 500 the LOAD
+        with _personal_locks_guard:
+            _warm_inflight.discard(t)
         _warm_slots.release()
 
 
