@@ -1529,7 +1529,9 @@ export default function DraftBoard() {
             </div>
           </div>
 
-          {railOk && <TopMetaStrip picks={topPicks} byId={byId} used={used} onPick={place} disabled={step.kind === "done"} />}
+          {railOk && <TopMetaStrip picks={topPicks} byId={byId} used={used} onPick={place} disabled={step.kind === "done"}
+            myTurn={myTurn} fieldableSet={fieldableSet} boostedSet={boostedSet} ownedSet={ownedSet}
+            powerFloor={powerFloor} bracket={bracket} />}
         </div>
       </div>
 
@@ -1794,13 +1796,24 @@ function RowSkeleton() {
 
 // Skinny horizontal strip of the map's strongest brawlers at a full loadout — the pure meta,
 // stable across the draft. Icons only; a constant "who's generally strong here" reference.
-function TopMetaStrip({ picks, byId, used, onPick, disabled }: {
+function TopMetaStrip({ picks, byId, used, onPick, disabled, myTurn, fieldableSet, boostedSet, ownedSet, powerFloor, bracket }: {
   picks: TopPick[]; byId: Map<number, Brawler>; used: Set<number>;
   onPick: (id: number) => void; disabled: boolean;
+  myTurn?: boolean; fieldableSet?: Set<number>; boostedSet?: Set<number>; ownedSet?: Set<number>;
+  powerFloor?: number; bracket?: string | null;
 }) {
   const blurb =
     "The strongest picks right now if you owned every brawler at a full loadout (all gadgets, " +
     "gears & star powers). Updates as the draft fills in, but ignores your roster, the pure meta.";
+  // On your turn a top-meta pick you can't field is missing from your personalized rail with no
+  // reason — the exact gap that made a free brawler you owned at low power look un-recommended.
+  // Mark it here (dimmed + a badge) so the two rails reconcile: "best on this map, but you can't
+  // field it, and here's why." A free/boosted brawler clears any floor, so it is never flagged.
+  const gate = (id: number): { reason: string; badge: string } | null => {
+    if (!myTurn || !fieldableSet || fieldableSet.has(id) || boostedSet?.has(id)) return null;
+    if (ownedSet?.has(id)) return { reason: `needs Power ${powerFloor}${bracket ? ` in ${bracket}` : ""}`, badge: `P${powerFloor}` };
+    return { reason: "not owned", badge: "✕" };
+  };
   return (
     <div className="panel">
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)] cursor-help" title={blurb}>
@@ -1813,15 +1826,21 @@ function TopMetaStrip({ picks, byId, used, onPick, disabled }: {
           : picks.map((p, i) => {
               const b = byId.get(p.brawler_id);
               const isUsed = used.has(p.brawler_id);
+              const cant = gate(p.brawler_id);
               return (
                 <button key={p.brawler_id} onClick={() => onPick(p.brawler_id)} disabled={isUsed || disabled}
                   className="group relative disabled:cursor-not-allowed anim-snap"
-                  title={`#${i + 1}  ${p.name}\n${pct(p.score)} pick score · ${pct(p.map_winrate)} map win rate\nassumes a full loadout`}>
+                  title={`#${i + 1}  ${p.name}\n${pct(p.score)} pick score · ${pct(p.map_winrate)} map win rate\nassumes a full loadout${cant ? `\n⚠ you can't field this: ${cant.reason}` : ""}`}>
                   <span className="thumb block" style={cssVars({ "--tc": (b && RARITY_COLOR[b.rarity]) || "#26303f" })}>
-                    <Avatar b={b} size={44} dim={isUsed} />
+                    <Avatar b={b} size={44} dim={isUsed || !!cant} />
                   </span>
                   <span className="mono absolute -top-1 -left-1 text-[8px] px-0.5 leading-tight"
                     style={{ background: i === 0 ? "var(--gold)" : "var(--panel3)", color: i === 0 ? "#0a0a0c" : "var(--muted)", border: "1px solid var(--line)" }}>{i + 1}</span>
+                  {cant && !isUsed && (
+                    <span className="mono absolute -bottom-1 -right-1 text-[8px] px-0.5 leading-tight"
+                      style={{ background: "var(--muted)", color: "#0a0a0c", border: "1px solid var(--line)" }}
+                      title={cant.reason}>{cant.badge}</span>
+                  )}
                 </button>
               );
             })}

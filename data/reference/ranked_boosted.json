@@ -1,8 +1,8 @@
 {
-  "_comment": "Ranked free / 'boosted' brawlers — the maxed brawlers everyone may use in Ranked this season, scraped from the release-notes 'Ranked' section by backend/bsdraft/collect/boosted.py (the boosted-watch CI job). 'active' is the current season; the serving layer resolves the names to ids and treats them as owned-at-full-loadout when personalizing. Hand-editable. All dates are UTC: a bare date means that whole UTC day, a full ISO datetime (e.g. 2026-08-19T10:00:00Z) pins the hour. 'valid_until' is the last moment the active rotation serves (a bare date = through that day's end). An 'upcoming' entry may carry a hand-staged 'active_from': the loader hands over to it automatically from that moment (no API/blog exposes the live season, so the flip is human knowledge — stage it here rather than editing at midnight); until then, after valid_until, nothing serves — a deliberate fail-safe gap when the exact flip hour is unknown. An upcoming entry with no 'active_from' is never served. A boosted-watch rewrite carries these dates forward for seasons whose names still match.",
+  "_comment": "Ranked free / 'boosted' brawlers — the maxed brawlers everyone may use in Ranked this season, scraped from the release-notes 'Ranked' section by backend/bsdraft/collect/boosted.py (the boosted-watch CI job). 'active' is the current season; the serving layer resolves the names to ids and treats them as owned-at-full-loadout when personalizing. Hand-editable. All dates are UTC: a bare date means that whole UTC day, a full ISO datetime (e.g. 2026-08-19T10:00:00Z) pins the hour. 'valid_until' is the last moment a rotation serves (a bare date = through that day's end); it may sit on an entry or, legacy, at the top level for 'active'. An 'upcoming' entry may carry a hand-staged 'active_from': the loader hands over to it automatically from that moment (no API/blog exposes the live season, so the flip is human knowledge — stage it here rather than editing at midnight); until then, after valid_until, nothing serves — a deliberate fail-safe gap when the exact flip hour is unknown. An upcoming entry with no 'active_from' is never served, and one with no 'valid_until' is capped at 45 days past its start so an unmaintained file goes quiet instead of asserting a dead free set forever. 'grants' records brawlers made free OUTSIDE the seasonal rotation — the notes do not announce these — and survives a boosted-watch rewrite. A rewrite carries all these dates forward for seasons whose names still match.",
   "source_url": "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-june-2026",
   "scraped_at": "2026-08-11",
-  "valid_until": "2026-08-18",
+  "valid_until": "2026-08-19",
   "active": {
     "season": "Season 1",
     "brawlers": [
@@ -15,13 +15,21 @@
   "upcoming": [
     {
       "season": "Season 2",
-      "active_from": "2026-08-19T10:00:00Z",
+      "active_from": "2026-08-20",
       "brawlers": [
         "Trunk",
         "Willow",
         "Kaze"
       ],
       "featured_mode": "Brawl Ball"
+    }
+  ],
+  "grants": [
+    {
+      "brawler": "Nori",
+      "since": "2026-08-25",
+      "valid_until": null,
+      "note": "Free outside the seasonal rotation — no release note announced it. Detected from match data 2026-08-26: Nori went to 100.0% Power 11 across every ranked slot on 08-25 (18,956 slots) and 08-26 (5,903), with zero P9/P10, after sitting at 83-94% P11 since release. Her distinct-player reach doubled overnight (3.99% -> 8.79%). Season 2's rotation (Trunk/Willow/Kaze) is unaffected and still serves."
     }
   ]
 }

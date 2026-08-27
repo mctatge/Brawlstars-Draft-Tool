@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -27,6 +27,11 @@ from bsdraft.constants import (
 CLASS_OVERRIDES_PATH = Path(__file__).resolve().parent / "class_overrides.json"
 RANKED_BOOSTED_PATH = REFERENCE_DIR / "ranked_boosted.json"
 ECONOMY_PATH = REFERENCE_DIR / "economy.json"
+
+# How long a rotation / grant with no explicit ``valid_until`` may keep serving after its start.
+# A Ranked season runs ~4-5 weeks, so this never truncates a live one; it exists so an
+# unmaintained file goes QUIET rather than asserting a long-expired free set forever.
+_MAX_UNBOUNDED_ROTATION_DAYS = 45
 
 # Maps that are live in the ranked rotation but whose upstream Brawlify/BrawlAPI ``disabled``
 # flag lags behind it (the events feed tracks casual rotation and can miss a ranked-only pool).
@@ -215,11 +220,20 @@ def _rotation_for_now(doc: dict, now: datetime) -> Optional[dict]:
     (expiring early misleads no one), but a malformed / absent ``active_from`` keeps an upcoming
     rotation *unserved* (starting early would mislead — the exact case this file's fail-safes
     exist to prevent). Between an expired ``valid_until`` and a not-yet-arrived ``active_from``
-    nothing serves — a deliberate gap for when the exact flip hour is unknown."""
+    nothing serves — a deliberate gap for when the exact flip hour is unknown.
+
+    An entry may carry its own ``valid_until``; a *promoted* upcoming entry that carries none
+    would otherwise serve forever, because only ``active`` was ever bounded (an unmaintained file
+    then keeps asserting a long-dead free set — fail-dangerous, the one thing this file must not
+    do). So an un-ended rotation is capped at ``_MAX_UNBOUNDED_ROTATION_DAYS`` past its start:
+    well beyond a real season, short enough that a stale file goes quiet instead of lying."""
     best = None  # (start, rotation) — later start wins; an upcoming entry beats `active` on a tie
     active = doc.get("active") or {}
     if active:
-        until = _parse_boundary(doc.get("valid_until"), end_of_day=True)
+        # Entry-level end wins over the legacy top-level one, which only ever bounded `active`.
+        until = _parse_boundary(active.get("valid_until"), end_of_day=True)
+        if until is None:
+            until = _parse_boundary(doc.get("valid_until"), end_of_day=True)
         if until is None or now <= until:  # unset/malformed boundary — keep serving
             best = (datetime.min.replace(tzinfo=timezone.utc), active)
     for entry in doc.get("upcoming") or []:
@@ -228,9 +242,42 @@ def _rotation_for_now(doc: dict, now: datetime) -> Optional[dict]:
         start = _parse_boundary(entry.get("active_from"), end_of_day=False)
         if start is None:
             continue  # not staged (or malformed) — never risk serving a rotation early
-        if start <= now and (best is None or start >= best[0]):
+        end = _parse_boundary(entry.get("valid_until"), end_of_day=True)
+        if end is None:
+            end = start + timedelta(days=_MAX_UNBOUNDED_ROTATION_DAYS)
+        if start <= now <= end and (best is None or start >= best[0]):
             best = (start, entry)
     return best[1] if best else None
+
+
+def _active_grants(doc: dict, now: datetime) -> list:
+    """Brawler names free right now via a **grant** — free outside the seasonal rotation.
+
+    The release notes' "Free Brawler Rotation" is not the whole free set: a brawler can be made
+    free mid-season with no announcement at all (observed 2026-08-25, when Nori went to 100%
+    Power 11 in every ranked match five days after the Season 2 flip). Those grants are recorded
+    here as ``{"brawler", "since", "valid_until"}`` entries, separate from ``active``/``upcoming``
+    so a boosted-watch rewrite (which only knows what the notes print) can't destroy them.
+
+    Same asymmetric fail-safes as the rotation: a missing/malformed ``since`` never serves
+    (starting early misleads), while ``valid_until`` is optional and capped the same way an
+    un-ended rotation is, so a forgotten grant expires instead of lying forever."""
+    out = []
+    for entry in doc.get("grants") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("brawler")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        start = _parse_boundary(entry.get("since"), end_of_day=False)
+        if start is None or start > now:
+            continue
+        end = _parse_boundary(entry.get("valid_until"), end_of_day=True)
+        if end is None:
+            end = start + timedelta(days=_MAX_UNBOUNDED_ROTATION_DAYS)
+        if now <= end:
+            out.append(name)
+    return out
 
 
 def load_ranked_boosted() -> tuple:
@@ -243,17 +290,23 @@ def load_ranked_boosted() -> tuple:
     :func:`_rotation_for_now` against a UTC clock, so season flips happen at the staged boundary
     even on a long-lived, kept-warm process, and every serving host agrees on the FREE set.
 
+    The seasonal rotation is **not** the whole free set — a brawler can be granted free
+    mid-season with no announcement (see :func:`_active_grants`), so any currently-serving
+    ``grants`` entries are unioned in. This file is only the hand-maintained half of the answer;
+    the authoritative live signal is derived from match data (see
+    :mod:`bsdraft.engine.freebrawlers`), which catches unannounced grants on its own.
+
     Fail-safe (the list must never *mislead* — telling a player they can freely pick a brawler
     they actually can't is worse than showing none): returns ``()`` when the file is absent /
-    unreadable, when no name resolves, or when no rotation covers the current moment."""
+    unreadable, when no name resolves, or when nothing covers the current moment."""
     doc = _ranked_boosted_doc()
     if doc is None:
         return ()
-    rotation = _rotation_for_now(doc, _now_utc())
-    if rotation is None:
-        return ()
+    now = _now_utc()
+    rotation = _rotation_for_now(doc, now) or {}
+    names = list(rotation.get("brawlers", []) or []) + _active_grants(doc, now)
     ids = []
-    for name in rotation.get("brawlers", []) or []:
+    for name in names:
         b = brawler_by_name(name) if isinstance(name, str) else None
         if b is not None and b.id not in ids:
             ids.append(b.id)

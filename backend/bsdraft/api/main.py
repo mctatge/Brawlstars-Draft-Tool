@@ -502,8 +502,11 @@ def reference():
         for m in (played or all_maps)
     ]
     brackets = [b for b in BRACKETS if _engine and b in _engine.bracket_stats]
+    # Same free/"boosted" set the recommender folds into a roster (hand-maintained list ∪
+    # data-derived), so the client's grid (placeable + "free" badge) and the picks agree on what
+    # is free — including unannounced mid-season grants the release notes miss.
     return S.ReferenceResponse(brawlers=brawlers, maps=maps, modes=list(RANKED_MODES),
-                               brackets=brackets, boosted=list(R.load_ranked_boosted()))
+                               brackets=brackets, boosted=list(_free_brawler_ids()))
 
 
 def _parse_id_csv(raw: Optional[str], cap: int = 5) -> List[int]:
@@ -827,9 +830,30 @@ def _roster_for(req: S.RecommendRequest):
         roster = None
     if roster is None:
         return None
-    for bid in R.load_ranked_boosted():
-        roster.setdefault(bid, _BoostedMastery())  # owned boosted brawler keeps its real mastery
+    for bid in _free_brawler_ids():
+        roster.setdefault(bid, _BoostedMastery())  # owned free brawler keeps its real mastery
     return roster
+
+
+def _free_brawler_ids() -> tuple:
+    """Ids of brawlers that are free/"boosted" in Ranked right now, folded into a personalized
+    roster at full loadout so an unowned-or-underlevelled free brawler is still recommendable.
+
+    Two sources, unioned — belt and suspenders because a wrong *omission* here silently deletes
+    the map's best pick (the Nori report), while a wrong *inclusion* only recommends a brawler the
+    player can't field, and both sources are conservative:
+
+      * The hand-maintained ``ranked_boosted.json`` (:func:`R.load_ranked_boosted`) — the leading
+        signal, and the only one that knows *next* season before any games are played.
+      * The data-derived set (:mod:`bsdraft.engine.freebrawlers`, computed at stats-build time and
+        carried in the stats artifact) — the authoritative signal for what is free *now*, which
+        catches unannounced mid-season grants the release notes never mention.
+    """
+    ids = set(R.load_ranked_boosted())
+    stats = getattr(_engine, "stats", None)
+    if stats is not None:
+        ids |= set(getattr(stats, "free_brawler_ids", ()))
+    return tuple(ids)
 
 
 @app.post("/api/recommend", response_model=S.RecommendResponse)

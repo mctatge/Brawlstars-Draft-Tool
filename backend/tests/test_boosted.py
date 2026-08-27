@@ -377,8 +377,85 @@ def test_reference_non_string_dates_fail_safe_not_500():
     assert ids == (R.brawler_by_name("Berry").id,)     # active serves; staged entry stays dark
 
 
-_ROTATION_KEYS = {"season", "brawlers", "featured_mode", "active_from"}
-_DOC_KEYS = {"_comment", "source_url", "scraped_at", "valid_until", "active", "upcoming"}
+def test_reference_grant_unions_in_outside_the_rotation():
+    # A grant is a brawler made free OUTSIDE the seasonal rotation (the notes never announce it,
+    # e.g. Nori 2026-08-25). It unions in on top of whatever rotation serves, gated by its own
+    # 'since'/'valid_until' — independent of the season boundaries.
+    doc = {"valid_until": "2026-08-19",
+           "active": {"season": "S1", "brawlers": ["Berry", "Tara", "Meg"]},
+           "upcoming": [{"season": "S2", "active_from": "2026-08-20", "brawlers": ["Trunk"]}],
+           "grants": [{"brawler": "Nori", "since": "2026-08-25", "valid_until": None}]}
+    nori = R.brawler_by_name("Nori").id
+    with _committed_at(doc):
+        with _serving_now("2026-08-24T12:00:00Z"):     # grant not yet live
+            assert nori not in R.load_ranked_boosted()
+        with _serving_now("2026-08-26T12:00:00Z"):     # grant live, on top of Season 2
+            ids = R.load_ranked_boosted()
+            assert nori in ids and R.brawler_by_name("Trunk").id in ids
+
+
+def test_reference_grant_since_fail_safe():
+    # A grant with no/malformed 'since' never serves (starting free-status early misleads).
+    for since in (None, "someday", 20260825):
+        with _serving_now("2026-08-26T12:00:00Z"):
+            with _committed_at({"active": {"season": "S1", "brawlers": ["Berry"]},
+                                "grants": [{"brawler": "Nori", "since": since}]}):
+                assert R.brawler_by_name("Nori").id not in R.load_ranked_boosted()
+
+
+def test_reference_promoted_upcoming_expires_when_unbounded():
+    # The bug this closes: a promoted 'upcoming' entry once served FOREVER because only 'active'
+    # was ever bounded. An un-ended rotation must now go quiet _MAX_UNBOUNDED_ROTATION_DAYS after
+    # its start, so an unmaintained file fails safe (empty) instead of asserting a dead free set.
+    doc = {"valid_until": "2026-08-19",
+           "active": {"season": "S1", "brawlers": ["Berry"]},
+           "upcoming": [{"season": "S2", "active_from": "2026-08-20", "brawlers": ["Trunk"]}]}
+    with _committed_at(doc):
+        with _serving_now("2026-09-01T12:00:00Z"):     # well within the cap — still serves
+            assert R.brawler_by_name("Trunk").id in R.load_ranked_boosted()
+        with _serving_now("2099-01-01T00:00:00Z"):     # long past the cap — quiet, not lying
+            assert R.load_ranked_boosted() == ()
+
+
+def test_reference_entry_valid_until_bounds_a_promoted_rotation():
+    # An entry may carry its own explicit end, which bounds it precisely (no reliance on the cap).
+    # `active` is expired here too, so once the promoted entry ends nothing serves.
+    doc = {"valid_until": "2026-08-19", "active": {"season": "S1", "brawlers": ["Berry"]},
+           "upcoming": [{"season": "S2", "active_from": "2026-08-20", "valid_until": "2026-08-31",
+                         "brawlers": ["Trunk"]}]}
+    trunk = R.brawler_by_name("Trunk").id
+    with _committed_at(doc):
+        with _serving_now("2026-08-31T23:00:00Z"):
+            assert R.load_ranked_boosted() == (trunk,)
+        with _serving_now("2026-09-01T00:30:00Z"):
+            assert R.load_ranked_boosted() == ()
+
+
+def test_write_document_preserves_grants_and_entry_dates():
+    # A rescrape knows rotation *content*, never grants (the notes don't mention them) nor staged
+    # dates — both must survive a rewrite verbatim, or a routine notes edit silently deletes a
+    # live grant / staged handover.
+    report = B.parse_boosted(
+        _mk_html([_ranked_block(
+            _season("Season 1", "Gem Grab", ["Berry", "Tara", "Meg"]),
+            _season("Season 2", "Brawl Ball", ["Trunk", "Willow", "Kaze"]))]), JUNE_URL)
+    committed = {
+        "active": {"season": "Season 1", "brawlers": ["Berry", "Tara", "Meg"]},
+        "upcoming": [{"season": "Season 2", "active_from": "2026-08-20",
+                      "valid_until": "2026-09-15", "brawlers": ["Trunk", "Willow", "Kaze"]}],
+        "grants": [{"brawler": "Nori", "since": "2026-08-25", "valid_until": None}],
+    }
+    with _committed_at(committed) as p:
+        B.write_document(report)
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    assert doc["grants"] == committed["grants"]
+    s2 = doc["upcoming"][0]
+    assert s2["active_from"] == "2026-08-20" and s2["valid_until"] == "2026-09-15"
+
+
+_ROTATION_KEYS = {"season", "brawlers", "featured_mode", "active_from", "valid_until"}
+_DOC_KEYS = {"_comment", "source_url", "scraped_at", "valid_until", "active", "upcoming", "grants"}
+_GRANT_KEYS = {"brawler", "since", "valid_until", "note"}
 
 
 def test_committed_file_is_valid():
@@ -395,6 +472,11 @@ def test_committed_file_is_valid():
     for e in doc.get("upcoming") or []:
         if "active_from" in e:
             assert R._parse_boundary(e["active_from"], end_of_day=False) is not None
+    for g in doc.get("grants") or []:
+        assert set(g) <= _GRANT_KEYS, f"unknown grant key(s): {set(g) - _GRANT_KEYS}"
+        assert R._parse_boundary(g.get("since"), end_of_day=False) is not None, "grant needs a parseable 'since'"
+        if g.get("valid_until") is not None:
+            assert R._parse_boundary(g["valid_until"], end_of_day=True) is not None
 
     # A staged handover must actually hand over: active serves just before its end, the staged
     # successor serves from just after its start, and they differ.

@@ -102,7 +102,18 @@ a hard **fieldability gate**: Ranked doesn't normalize brawlers to a fixed power
 blocks selecting a brawler below a floor (Power 9 through Diamond, Power 11 from Mythic up), so
 `_roster_for` drops owned brawlers under `tiers.min_power_for_bracket(bracket)` before they're ever
 scored — an un-maxed brawler you can't field in Legendary must not be recommended. The season's
-free "boosted" brawlers arrive at Power 11 and are folded in after the gate.
+free "boosted" brawlers arrive at Power 11 and are folded in *after* the gate, so an owned-but-
+under-levelled free brawler (Ranked hands out a maxed copy) is still recommendable.
+
+The free set (`main._free_brawler_ids`) unions two sources, because a wrong *omission* silently
+deletes the map's best pick while a wrong *inclusion* only over-offers, and both sources are
+conservative: the hand-maintained `ranked_boosted.json` (leading signal, knows *next* season) and
+a signal read straight from match data (`engine/freebrawlers.py`, authoritative for *now*). The
+release notes' rotation list is incomplete — a brawler can be granted free mid-season with no
+announcement — but a free brawler is handed out maxed, so it shows as ~100% Power 11 with no
+levelling tail in recent Ranked data. `DraftStats` accumulates that power histogram while it
+already scans every match and ships the detected ids in the stats artifact, so the cloud (which
+loads, never rebuilds) gets it for free. See the memory note *free-brawlers-detectable-from-match-power*.
 
 ## See also
 

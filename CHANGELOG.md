@@ -4,6 +4,23 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-08-26
+
+- **Free brawlers you own at low power are recommended again.** When you own a brawler that's
+  free in Ranked this season, the game hands you a fully-maxed copy — but the tool was reading
+  your *account* power level, so an owned-at-Power-1 free brawler was treated as unfieldable and
+  silently dropped from your personalized picks, even when it was the map's best pick (Nori on
+  Bridge Too Far was the report that surfaced this). The free set now comes from two sources: the
+  hand-maintained rotation list **and** a signal read straight from match data — a brawler that
+  everyone fields at Power 11, with no one still levelling it, is free right now. That catches
+  mid-season grants the release notes never announce (Nori went free ~2026-08-25 with no notice).
+
+- **The "Top Meta" strip now says why a top pick isn't in your list.** On your turn, a strong
+  meta pick you can't field (not owned, or under the bracket's power floor) used to just be
+  missing from your personalized rail with no explanation, while the meta strip still showed it
+  at #1. Those picks are now dimmed and badged with the reason ("needs Power 11 in Mythic"), so
+  the two rails reconcile instead of contradicting each other.
+
 ## 2026-08-25
 
 - **A data refresh landing mid-draft no longer stalls your next pick.** The server syncs

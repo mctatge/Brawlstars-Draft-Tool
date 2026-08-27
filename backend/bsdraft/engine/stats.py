@@ -21,6 +21,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from bsdraft.data import reference as R
 from bsdraft.data.dataset import iter_matches, recent_matches
+from bsdraft.engine import freebrawlers
 from bsdraft.engine.tiers import match_bracket
 
 PRIOR = 20.0                   # pseudo-games at 0.5 used for smoothing
@@ -75,6 +76,12 @@ class DraftStats:
         # flip empties/fills it within the window). Anchored to the newest match, not the wall
         # clock, so a stalled crawl freezes the live set instead of draining it.
         self.map_games_recent: dict = defaultdict(float)
+        # Per-brawler power histogram over the free-detection window (raw counts, recent only):
+        # the free/"boosted" signal. A free brawler is handed out fully maxed, so its slots are
+        # ~100% Power 11 with no levelling tail — see :mod:`bsdraft.engine.freebrawlers`. Filled
+        # only within FREE_WINDOW_DAYS of the anchor; `free_brawler_ids` is derived after build.
+        self.pw_recent: dict = defaultdict(lambda: defaultdict(float))  # brawler -> {power: count}
+        self.free_brawler_ids: frozenset = frozenset()
         self.syn_games: dict = defaultdict(float)  # frozenset{b1, b2}
         self.syn_wins: dict = defaultdict(float)
         self.cnt_games: dict = defaultdict(float)  # (attacker, defender)
@@ -100,6 +107,7 @@ class DraftStats:
         self.ts_max = max(tss, default=0)
         anchor = self.recent_anchor_ts or self.ts_max
         recent_min = anchor - RECENT_WINDOW_DAYS * _DAY
+        free_min = anchor - freebrawlers.FREE_WINDOW_DAYS * _DAY
         for r, w, ts in zip(rows, self._recency_weights(tss), tss):
             won = r["a_won"]
             a = [p["brawler_id"] for p in r["team_a"]]
@@ -109,6 +117,13 @@ class DraftStats:
             self.map_games[mid] += w
             if anchor > 0 and ts >= recent_min:  # a timestamp-less row can't claim liveness
                 self.map_games_recent[mid] += 1.0
+            # Free status is global (a free brawler is free in every bracket), so only the global
+            # table accumulates the signal — a thin bracket table would just smear it.
+            if self.bracket is None and anchor > 0 and ts >= free_min:
+                for p in r["team_a"] + r["team_b"]:
+                    pw = p.get("power")
+                    if pw is not None:
+                        self.pw_recent[p["brawler_id"]][int(pw)] += 1.0
             for team, win in ((a, won), (b, not won)):
                 for x in team:
                     self.b_games[x] += w
@@ -130,6 +145,8 @@ class DraftStats:
                         self.cnt_wins[(x, y)] += w
                     else:
                         self.cnt_wins[(y, x)] += w
+        # Derive the free set from the recent power histogram (global table only; empty otherwise).
+        self.free_brawler_ids = freebrawlers.detect_free(self.pw_recent)
 
     # --- accessors (a bracket table shrinks each rate toward its global fallback) ---
     def brawler_rate(self, brawler_id: int, map_id: Optional[int] = None) -> Rate:

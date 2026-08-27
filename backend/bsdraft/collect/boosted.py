@@ -312,13 +312,14 @@ def _to_document(report: BoostedReport, committed: Optional[dict] = None) -> dic
     old_active = committed.get("active") or {}
     valid_until = (committed.get("valid_until")
                    if active and old_active.get("season") == active.season else None)
-    staged = {e.get("season"): e.get("active_from")
-              for e in (committed.get("upcoming") or []) if isinstance(e, dict)}
+    staged = {e.get("season"): e for e in (committed.get("upcoming") or []) if isinstance(e, dict)}
     upcoming = []
     for r in report.upcoming:
         entry = r.to_committed()
-        if staged.get(r.season):
-            entry["active_from"] = staged[r.season]
+        old = staged.get(r.season) or {}
+        for k in ("active_from", "valid_until"):   # hand-staged boundaries survive a rescrape
+            if old.get(k):
+                entry[k] = old[k]
         upcoming.append(entry)
     return {
         "_comment": ("Ranked free / 'boosted' brawlers — the maxed brawlers everyone may use in "
@@ -327,16 +328,25 @@ def _to_document(report: BoostedReport, committed: Optional[dict] = None) -> dic
                      "the current season; the serving layer resolves the names to ids and treats "
                      "them as owned-at-full-loadout when personalizing. Hand-editable. All dates "
                      "are UTC: a bare date means that whole UTC day, a full ISO datetime (e.g. "
-                     "2026-08-19T10:00:00Z) pins the hour. 'valid_until' is the last moment the "
-                     "active rotation serves. An 'upcoming' entry may carry a hand-staged "
-                     "'active_from': the loader hands over to it automatically from that moment; "
-                     "an entry without one is never served. A boosted-watch rewrite carries these "
+                     "2026-08-19T10:00:00Z) pins the hour. 'valid_until' is the last moment a "
+                     "rotation serves; it may sit on an entry or, legacy, at the top level for "
+                     "'active'. An 'upcoming' entry may carry a hand-staged 'active_from': the "
+                     "loader hands over to it automatically from that moment; an entry without "
+                     "one is never served, and one with no 'valid_until' is capped at 45 days "
+                     "past its start so an unmaintained file goes quiet instead of asserting a "
+                     "dead free set forever. 'grants' records brawlers made free OUTSIDE the "
+                     "seasonal rotation — the notes do not announce these — and is carried "
+                     "through untouched by a rewrite. A boosted-watch rewrite carries these "
                      "dates forward for seasons whose names still match."),
         "source_url": _safe_url(report.url),
         "scraped_at": _today(),
         "valid_until": valid_until,
         "active": active.to_committed() if active else None,
         "upcoming": upcoming,
+        # Grants are free brawlers the notes never mention (see reference._active_grants), so a
+        # scrape knows nothing about them and must carry them through verbatim — rebuilding this
+        # document from the page alone would silently delete a live one.
+        "grants": list(committed.get("grants") or []),
     }
 
 

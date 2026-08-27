@@ -43,6 +43,9 @@ def _table_to_dict(s: DraftStats) -> dict:
         out[name] = {f"{a}_{b}": round(v, 6) for (a, b), v in getattr(s, name).items()}
     for name in _DICTS_S:
         out[name] = {"_".join(map(str, sorted(fs))): round(v, 6) for fs, v in getattr(s, name).items()}
+    # Data-derived free/"boosted" set (global table only; see engine.freebrawlers). The raw
+    # power histogram it comes from is not shipped — only the computed ids the serving layer needs.
+    out["free_brawler_ids"] = sorted(s.free_brawler_ids)
     return out
 
 
@@ -64,6 +67,8 @@ def _dict_to_table(d: dict, fallback=None) -> DraftStats:
         # capped 60k rebuild for weeks.
         setattr(s, name, defaultdict(float, {frozenset(int(x) for x in k.split("_")): v
                                              for k, v in d[name].items()}))
+    # Optional (absent from artifacts published before the free detector existed → empty set).
+    s.free_brawler_ids = frozenset(int(x) for x in (d.get("free_brawler_ids") or ()))
     return s
 
 
