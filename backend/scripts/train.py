@@ -176,6 +176,11 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--halflife-days", type=float, default=30.0)
+    ap.add_argument("--class-synergy", action="store_true",
+                    help="add a learnable symmetric class x class within-team synergy matrix "
+                         "(archetype-level; pools every same-class pairing into one estimate), "
+                         "interpretable as 'which archetype pairs win together'. The learned "
+                         "signal is weak — see docs/model-evaluation.md.")
     ap.add_argument("--p-full", type=float, default=0.7,
                     help="probability a training example keeps its full 3v3 (rest are masked "
                          "to random partial draft states). 0.7 held full-comp parity with the "
@@ -250,7 +255,10 @@ def main() -> None:
     prev_pt = PROCESSED_DIR / "winprob.pt"
     if prev_pt.exists():
         ck = torch.load(prev_pt, map_location="cpu", weights_only=True)
-        pcfg = ModelConfig(**ck["config"])
+        # Filter to current ModelConfig fields so a checkpoint written with a since-removed
+        # config key (e.g. a retired experimental term) still loads as the paired baseline.
+        pcfg = ModelConfig(**{k: v for k, v in ck["config"].items()
+                              if k in ModelConfig.__dataclass_fields__})
         if (pcfg.num_brawlers, pcfg.num_maps, pcfg.num_modes) == (
                 E.num_brawlers(), E.num_maps(), E.num_modes()):
             prev = WinProbNet(pcfg)
@@ -268,7 +276,8 @@ def main() -> None:
             print("previous winprob.pt was trained on a different vocabulary — skipping the "
                   "paired baseline")
 
-    cfg = ModelConfig(E.num_brawlers(), E.num_maps(), E.num_modes(), mask_row=E.num_brawlers())
+    cfg = ModelConfig(E.num_brawlers(), E.num_maps(), E.num_modes(), mask_row=E.num_brawlers(),
+                      class_synergy=args.class_synergy)
 
     # Seed-independent tensors every candidate reuses; passed by reference, never mutated.
     shared = {

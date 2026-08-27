@@ -178,6 +178,59 @@ negligible cost (.0002 AUC vs the best syn-0 candidate).
   are unchanged — only the role *value* is gated. Not outcome-validated (no pick-level labels), same
   caveat as the rest of the trio.
 
+## Within-team synergy — the class-synergy term (2026-08-27)
+
+**Question that started it:** the recommender kept surfacing redundant picks — a second tank
+after a tank, Grom after Sprout (two immobile throwers, both dived by one assassin). Why doesn't
+the win-prob net discount that on its own?
+
+**Root cause (architecture).** The net's team strength is `S(team) = MLP(mean(brawler_emb), ctx)`.
+Mean-pooling is order-invariant but *collapses composition*: strip the MLP's one ReLU and `S`
+reduces to a pure sum of independent per-brawler contributions (`TEAM_SIZE` is fixed, so the mean's
+denominator never varies), making a brawler's marginal value independent of its teammates —
+redundancy is then *unrepresentable*. The only explicit interaction term, the counter head
+`PA·QB − PB·QA`, is exclusively cross-team; there was **no within-team interaction term at all**.
+
+**The fix that shipped.** A learnable symmetric **class×class** synergy matrix `M` (7 archetypes),
+entering the logit as `T(A) − T(B)` with `T(team) = Σ_{i<j} M[cls(i), cls(j)]` (see
+`models/winprob.py` / `models/serve.py`, `--class-synergy`). Archetype-level rather than
+per-brawler on purpose: it pools *every* same-class pairing in the data into one estimate — 28
+parameters over ~1.8M matches — where a per-brawler synergy embedding is starved (redundant pairs
+co-occur rarely) and swings wildly across retrains. The sign is never assumed; the data decides.
+
+**What the data actually supports — and it's weak.** Isolated from individual brawler strength,
+the redundancy signal is *comparable in size to seed noise*:
+
+- **Throwers (Artillery) are the one archetype whose same-class anti-synergy reproduces** across
+  seeds (diagonal ≈ −0.03 to −0.07; negative in every run) — the Grom+Sprout intuition, learned.
+- **Two tanks is NOT penalized, correctly.** Raw outcomes say stacked tanks *win* (Brawl Ball
+  win-rate by tank count: 0→0.48, 1→0.52, 2→0.55, 3→0.59 over 573k matches), and it is **not a
+  skill artifact** — `corr(tank_count, tier) = −0.14` (weaker players stack tanks and still win).
+  The class term's Tank diagonal sits near 0: tanks win on *individual strength* (the strength
+  term), not on stacking synergy — so the model keeps them, which is right.
+- Every other archetype's diagonal is noise around zero (flips sign across seeds; full-matrix
+  seed-to-seed correlation only ≈ +0.6).
+
+**Two levers that did *not* work** (removed, not shipped):
+
+- **Rank-weighting** the loss toward high-tier games (to learn the high-rank truth that stacked
+  throwers stop winning above Mythic) was *counterproductive* in every variant — at high rank the
+  few double-thrower comps that appear are played deliberately/well, so the residual anti-synergy
+  *shrank*. It also trims the (correct) tank behavior. Confirmed across both the per-brawler and
+  class parameterizations.
+- **L2-regularizing** the class matrix to isolate "throwers only" *backfired*: shrinking toward 0
+  drags the thrower signal (~0.05) down into the noise band (~0.02), where it flips sign across
+  seeds — seed correlation went from +0.59 (plain) to −0.08 (regularized). Signal and noise are
+  the same size; a magnitude penalty can't separate them.
+
+**Shipping decision.** The plain, all-rank class-synergy term is shipped as a *gentle, honest
+nudge*: it reproducibly discounts throwers and leaves everything else ~unchanged. Cost is
+**+0.0034 full-comp val logloss / −0.008 AUC** vs. the strength+counter baseline — right at the
+~0.0035 seed-noise floor, i.e. roughly accuracy-neutral. The broader lesson: **redundancy
+discounting is barely learnable from this (mid-ladder) data** — the effect is real only for
+throwers and only weakly; anything stronger or cleaner would need high-rank data (unavailable) or
+a deliberate heuristic, not more model tuning.
+
 ## Reproduce
 
 ```bash

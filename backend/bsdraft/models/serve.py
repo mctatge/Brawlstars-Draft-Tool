@@ -3,12 +3,15 @@
 Loads the weights exported by ``scripts/export_model.py`` (``winprob.npz``) and replicates
 ``WinProbNet.forward`` exactly:
 
-    logit = [ S(A, ctx) - S(B, ctx) ] + [ PA·QB - PB·QA ]
+    logit = [ S(A, ctx) - S(B, ctx) ] + [ PA·QB - PB·QA ] + [ T(A) - T(B) ]
 
 where ctx = concat(map_emb, mode_emb); S is the strength MLP over the mean brawler
-embedding + ctx (Linear -> ReLU -> [Dropout, a no-op at eval] -> Linear); and P/Q are the
-low-rank counter embeddings. Training still uses PyTorch (``scripts/train.py``); only
-inference is reimplemented here so the deployed API needs neither torch nor the training deps.
+embedding + ctx (Linear -> ReLU -> [Dropout, a no-op at eval] -> Linear); P/Q are the
+low-rank counter embeddings; and T(team) = sum_{i<j} M[cls(i), cls(j)] is the optional
+class-level within-team synergy term (present only when the export carries ``class_syn`` —
+older artifacts omit it and this file skips the term). Training still uses PyTorch
+(``scripts/train.py``); only inference is reimplemented here so the deployed API needs
+neither torch nor the training deps.
 
 Partial drafts: artifacts trained with masked drafts carry a ``mask_row`` in their config —
 a trained "unknown slot" embedding row. When present (``supports_partial``), teams with
@@ -36,11 +39,13 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from bsdraft.constants import MODE_CAMEL_TO_DISPLAY, PROCESSED_DIR, TEAM_SIZE
+from bsdraft.constants import BRAWLER_CLASSES, MODE_CAMEL_TO_DISPLAY, PROCESSED_DIR, TEAM_SIZE
 from bsdraft.data import encoders as E
 
 DEFAULT_PATH = PROCESSED_DIR / "winprob.npz"
 logger = logging.getLogger(__name__)
+
+_N_CLASSES = len(BRAWLER_CLASSES)          # class-level synergy: 7 archetypes; index 7 = unknown/mask
 
 # Embedding matrices, grouped by the vocabulary that indexes them.
 _BRAWLER_MATRICES = ("brawler.weight", "counter_p.weight", "counter_q.weight")
@@ -65,6 +70,9 @@ class WinProbModel:
         self._brawler_rows: Dict[int, int] = {}
         self._map_rows: Dict[int, int] = {}
         self._mode_rows: Dict[str, int] = {}
+        # class index per brawler row (len num_brawlers+2: real rows, mask, OOV/fallback), for the
+        # optional class-level synergy term; None when the export has no class_syn matrix.
+        self._class_rows: Optional[np.ndarray] = None
         if self.path.exists():
             data = np.load(self.path, allow_pickle=False)
             self.cfg = json.loads(data["_config"].item())
@@ -72,6 +80,7 @@ class WinProbModel:
                        if k != "_config" and not k.startswith("_vocab_")}
             self._load_vocab(data)
             self._add_fallback_rows()
+            self._class_rows = self._build_class_rows()
 
     def _load_vocab(self, data) -> None:
         """Read the pinned id->row tables written by ``scripts/export_model.py``. Without them a
@@ -104,6 +113,26 @@ class WinProbModel:
             if key in _BRAWLER_MATRICES and self.supports_partial:
                 base = m[: int(self.cfg["mask_row"])]   # the mask row is not a real brawler
             w[key] = np.vstack([m, base.mean(axis=0, keepdims=True)])
+
+    def _build_class_rows(self) -> Optional[np.ndarray]:
+        """Class index for every possible brawler row, for the class-level synergy term. Built from
+        the reference catalog + the fixed ``BRAWLER_CLASSES`` order — the exact mapping training
+        used — keyed by the export's pinned brawler vocabulary. The mask row and the appended
+        OOV/fallback row map to the unknown class (``_N_CLASSES``) and are excluded from synergy.
+        Returns None when the export carries no ``class_syn`` matrix or predates pinned vocab."""
+        if self._w is None or "class_syn" not in self._w or not self._brawler_rows:
+            return None
+        from bsdraft.data import reference as R
+        cls_idx = {c: i for i, c in enumerate(BRAWLER_CLASSES)}
+        cls_by_id = {b.id: b.cls for b in R.load_brawlers()}
+        n1 = self._vocab.get("brawler.weight")           # num_brawlers + 1 (real rows + mask)
+        if n1 is None:
+            return None
+        rows = np.full(n1 + 1, _N_CLASSES, dtype=np.int64)   # +1 covers the OOV/fallback row
+        for bid, row in self._brawler_rows.items():
+            if 0 <= row < n1 - 1:                        # real brawler rows only
+                rows[row] = cls_idx.get(cls_by_id.get(bid), _N_CLASSES)
+        return rows
 
     def _brawler_row(self, brawler_id: int) -> int:
         """Trained row for a brawler id. An id the export predates returns a sentinel past the
@@ -254,4 +283,23 @@ class WinProbModel:
         pb = w["counter_p.weight"][b].sum(axis=1)
         qb = w["counter_q.weight"][b].sum(axis=1)
         counter = (pa * qb).sum(axis=1) - (pb * qa).sum(axis=1)
-        return _sigmoid(s + counter).tolist()
+
+        logit = s + counter
+        # Class-level synergy: sum of the symmetric class-pair weight over the 3 slot pairs,
+        # excluding mask / unknown-class slots. Present only when the export carries class_syn.
+        csyn_w = w.get("class_syn")
+        if csyn_w is not None and self._class_rows is not None:
+            M = csyn_w + csyn_w.T                                       # symmetrize (N_CLASSES^2)
+            cr = self._class_rows
+
+            def team_csyn(team_rows: np.ndarray) -> np.ndarray:
+                c = cr[team_rows]                                       # (N, 3) class idx
+                real = c < _N_CLASSES
+                cc = np.minimum(c, _N_CLASSES - 1)                     # safe gather
+                tot = np.zeros(team_rows.shape[0], dtype=np.float64)
+                for i, j in ((0, 1), (0, 2), (1, 2)):
+                    both = (real[:, i] & real[:, j]).astype(np.float64)
+                    tot = tot + both * M[cc[:, i], cc[:, j]]
+                return tot
+            logit = logit + (team_csyn(a) - team_csyn(b))
+        return _sigmoid(logit).tolist()
