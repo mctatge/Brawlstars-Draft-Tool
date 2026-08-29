@@ -61,6 +61,12 @@ class Brawler:
     star_powers: tuple
     gadgets: tuple
     image_url: str
+    # False for a catalog entry still flagged unreleased upstream (a datamined / leaked-early
+    # brawler that sits in the snapshot before it is live in the game). Such an entry stays in the
+    # vocabulary (see load_brawlers / brawler_index) but must be kept out of every pickable /
+    # recommendable pool — see pickable_brawlers(). Defaults True so a snapshot missing the key
+    # can't silently hide a real brawler.
+    released: bool = True
 
 
 @dataclass(frozen=True)
@@ -117,11 +123,31 @@ def load_brawlers() -> tuple:
                 for g in (x.get("gadgets") or [])
             ),
             image_url=x.get("imageUrl", ""),
+            released=bool(x.get("released", True)),
         )
         for x in raw
     ]
     brawlers.sort(key=lambda b: b.id)
     return tuple(brawlers)
+
+
+@lru_cache(maxsize=1)
+def pickable_brawlers() -> tuple:
+    """Released brawlers only — the draftable / recommendable / UI-pickable pool.
+
+    Excludes any catalog entry still flagged ``released: false`` (a datamined or leaked-early
+    brawler that sits in the snapshot before it is live in the game). Those have no match data,
+    so every data-driven signal falls back to a neutral prior and the entry is never *penalised*
+    the way a real brawler with mixed stats is — on an otherwise-empty board it floats to the top
+    of the pick list while not even being selectable in-game.
+
+    Deliberately filtered **here** and not in :func:`load_brawlers` / :func:`brawler_index`: those
+    build the model's pinned embedding vocabulary, where dropping an entry would shift every
+    higher-id brawler onto a neighbour's trained row and desync from ``winprob.npz``. This is the
+    same "filter at the boundary, not in the vocab-building loader" idiom the reference endpoint
+    uses for maps (see ``api/main.py``). A leaked entry keeps its pinned row and re-enters this
+    pool automatically the moment ``released`` flips true upstream — no code change, no retrain."""
+    return tuple(b for b in load_brawlers() if b.released)
 
 
 @lru_cache(maxsize=1)

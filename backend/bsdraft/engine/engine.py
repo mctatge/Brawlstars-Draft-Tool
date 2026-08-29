@@ -9,13 +9,25 @@ from bsdraft.data import reference as R
 from bsdraft.engine.bans import BanScore
 from bsdraft.engine.scoring import PickScore, _class_of, model_marginals, score_candidate
 from bsdraft.engine.state import DraftState
-from bsdraft.engine.stats import DraftStats
+from bsdraft.engine.stats import PRIOR, DraftStats
 from bsdraft.engine import bans as bans_mod
 from bsdraft.engine import composition as composition_mod
 from bsdraft.engine import gameplan as gameplan_mod
 from bsdraft.engine import itemstats as itemstats_mod
 from bsdraft.engine import purchases as purchases_mod
 from bsdraft.models.serve import WinProbModel
+
+# Minimum evidence before a brawler may be *recommended*. A candidate whose global effective
+# (recency-weighted) game count is below this can only be scored from priors — a baseline-shrunk
+# map winrate, a class-level role prior, and an untrained / mean model embedding — so ranking it
+# is a guess dressed up as a number, not a recommendation (the board that motivated this showed a
+# 0-game brawler on top at "CONFIDENCE 0%"; both an unreleased catalog leak AND a brand-new
+# released brawler the crawler hasn't logged yet hit this). The floor is the stats smoothing
+# ``PRIOR``: below it, the neutral prior still outweighs the brawler's own record. MIN_TABLE_MATCHES
+# guards a cold start — below it the whole table is too thin for "unseen" to mean anything, so
+# nothing is gated and a rebuilding backend still shows a full board.
+MIN_RECO_GAMES = float(PRIOR)
+MIN_TABLE_MATCHES = 5000
 
 
 class DraftEngine:
@@ -33,7 +45,11 @@ class DraftEngine:
 
     def candidates(self, state: DraftState, roster=None) -> List[int]:
         used = state.picked_or_banned()
-        ids = [b.id for b in R.load_brawlers() if b.id not in used]
+        # pickable_brawlers() (not load_brawlers()) so an unreleased catalog entry is never
+        # recommended: with no match data its signals sit at a neutral prior and it would
+        # otherwise float to the top of an empty board. The roster path already excludes it (it
+        # is neither owned nor free), but the no-roster / meta path relies on this filter.
+        ids = [b.id for b in R.pickable_brawlers() if b.id not in used]
         if roster is not None:
             ids = [i for i in ids if i in roster]  # only brawlers the player owns
         return ids
@@ -43,10 +59,22 @@ class DraftEngine:
         projection and why the list re-ranks as the ban set fills in."""
         return bans_mod.recommend(state, self._stats_for(state), self.model, top=top, roster=roster)
 
+    def _data_backed(self, cands: List[int]) -> List[int]:
+        """Drop candidates the collected data has essentially never seen, so a brawler with no
+        record is never *recommended* from priors alone (see MIN_RECO_GAMES). Gates on the GLOBAL
+        table — "have we observed this brawler at all" is a global question, independent of which
+        rank-bracket table scores it or which map is up. Never returns empty: on a thin / rebuilding
+        table (``n < MIN_TABLE_MATCHES``) or the pathological all-thin case it falls back to the
+        ungated list, so a cold start still shows a full board rather than nothing."""
+        if self.stats.n < MIN_TABLE_MATCHES:
+            return cands
+        kept = [c for c in cands if self.stats.brawler_rate(c, None).games >= MIN_RECO_GAMES]
+        return kept or cands
+
     def recommend_picks(self, state: DraftState, top: int = 10, weights=None, roster=None,
                         personal=None) -> List[PickScore]:
         stats = self._stats_for(state)
-        cands = self.candidates(state, roster)
+        cands = self._data_backed(self.candidates(state, roster))
         # One batched model pass over all candidates (they share the enemy team), then score.
         # Bit-for-bit identical to computing each marginal inside score_candidate.
         win_probs = model_marginals(state, cands, self.model, stats)

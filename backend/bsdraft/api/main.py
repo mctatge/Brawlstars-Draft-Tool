@@ -450,9 +450,12 @@ def meta():
 
 @app.get("/api/reference", response_model=S.ReferenceResponse)
 def reference():
+    # pickable_brawlers() (not load_brawlers()) so the grid, its count, and any client-built
+    # candidate list drop unreleased catalog entries — same "filter at the boundary, not in the
+    # vocab-building loader" reasoning applied to maps just below.
     brawlers = [
         S.BrawlerRef(id=b.id, name=b.name, cls=b.cls, rarity=b.rarity, image_url=b.image_url)
-        for b in R.load_brawlers()
+        for b in R.pickable_brawlers()
     ]
     # `load_ranked_maps()` is the catalog's *not-retired* set — every map still in the game's
     # files across all modes, ~113 of them. Ranked only rotates a handful per mode per season, so

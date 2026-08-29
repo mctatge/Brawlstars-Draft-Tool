@@ -299,7 +299,7 @@ def recommend(state: DraftState, stats, model=None, top: int = 6, roster=None) -
     ordering rather than a half-built version of this one."""
     used = state.picked_or_banned()
     rows: List[BanScore] = []
-    for b in R.load_brawlers():
+    for b in R.pickable_brawlers():  # released-only: never offer an unreleased entry as a ban
         if b.id in used:
             continue
         rate = stats.brawler_rate(b.id, state.map_id)

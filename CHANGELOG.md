@@ -4,6 +4,25 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-08-28
+
+- **The draft no longer recommends a brawler it has no data on.** A pick was only ever as good as
+  the evidence behind it — but a brawler the crawler has never logged (a datamined catalog entry
+  like "Buzz Lightyear", *or* a real brawler that just released, like Wendy) has no evidence at all.
+  Its map / synergy / counter signals fell back to neutral and the model embedding was untrained, so
+  it was never marked down the way real brawlers with real (sometimes mediocre) stats are — and on a
+  first pick where its class role-fit was high (a Damage Dealer on Heist), that "never penalized"
+  neutrality floated it into the top picks at **CONFIDENCE 0%**. A brawler is now withheld from the
+  recommendations (The Call, the pick list, the meta strip, the ban list) until we've actually
+  observed it — its own record has to at least outweigh the smoothing prior. It rejoins the moment
+  real games accumulate; nothing that's genuinely in play is affected. (This kicks in only once the
+  stats table is populated, so a cold-starting server still shows a full board.)
+
+- **Unreleased brawlers are also dropped from the pickable grid.** A catalog entry flagged
+  not-yet-released (Buzz Lightyear) is no longer a selectable tile — you can't draft it in-game, so
+  it shouldn't be offered. (The model's vocabulary is untouched; the entry reappears on its own if
+  it ever releases.)
+
 ## 2026-08-26
 
 - **Free brawlers you own at low power are recommended again.** When you own a brawler that's
