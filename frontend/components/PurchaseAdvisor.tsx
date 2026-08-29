@@ -177,8 +177,8 @@ function RecCard({ r, rank, b, max }: { r: PurchaseRec; rank: number; b?: Brawle
       {b
         ? <img src={b.image_url} alt={b.name} title={b.name} width={48} height={48}
             className="shrink-0 object-cover self-start"
-            style={{ width: 48, height: 48, border: `1px solid ${kind.color}` }} />
-        : <div className="shrink-0 self-start" style={{ width: 48, height: 48, background: "var(--panel2)", border: "1px solid var(--line)" }} />}
+            style={{ width: 48, height: 48, border: `2px solid ${kind.color}` }} />
+        : <div className="shrink-0 self-start" style={{ width: 48, height: 48, background: "var(--panel2)", border: "2px solid var(--line)" }} />}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap leading-tight">
           <span className="mono text-[8px] px-1.5 py-0.5 font-bold tracking-[0.08em] shrink-0"

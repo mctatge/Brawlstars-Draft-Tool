@@ -182,11 +182,11 @@ function Avatar({ b, size = 56, dim, ring, active, fluid }: { b?: Brawler; size?
   const ultra = !ring && b?.rarity === "Ultra Legendary";
   const cls = `object-cover ${fluid ? "block" : ""} ${active ? "slot-active" : ""} ${ultra ? "ultra-ring" : ""}`;
   const box = fluid ? { width: "100%", aspectRatio: "1 / 1" } : { width: `${size}px`, height: `${size}px` };
-  if (!b) return <div style={{ ...box, borderColor: border }} className="bg-[var(--panel2)] border" />;
+  if (!b) return <div style={{ ...box, borderColor: border }} className="bg-[var(--panel2)] border-2" />;
   return (
     <img src={b.image_url} alt={b.name} title={b.name} width={size} height={size}
       className={cls}
-      style={cssVars({ ...box, opacity: dim ? "0.3" : "1", border: ultra ? undefined : `1px solid ${border}`, "--ring": border })} />
+      style={cssVars({ ...box, opacity: dim ? "0.3" : "1", border: ultra ? undefined : `2px solid ${border}`, "--ring": border })} />
   );
 }
 
