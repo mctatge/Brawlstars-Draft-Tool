@@ -401,10 +401,15 @@ function GearSection({ gears, isMySeat, ownedGears }: {
 
 type SlotRect = { left: number; top: number; bottom: number; width: number };
 
-function LoadoutPopover({ data, isMySeat, owned, accent, rect }: {
+function LoadoutPopover({ data, isMySeat, owned, boosted, accent, rect }: {
   data: LoadoutResponse | "loading" | undefined;
-  isMySeat: boolean; owned?: OwnedBrawler; accent: string; rect: SlotRect;
+  isMySeat: boolean; owned?: OwnedBrawler; boosted?: boolean; accent: string; rect: SlotRect;
 }) {
+  // A free/"boosted" brawler is handed out fully maxed this Ranked season — every gadget / star
+  // power / gear unlocked — so the owned-item filter must not lock anything on your own seat. Treat
+  // it like a general slot (best-fit picks, nothing locked); the header explains why it's unlocked.
+  const asInventory = isMySeat && !boosted;
+  const freeMaxed = isMySeat && !!boosted;
   // Fixed, viewport-clamped positioning: centered under the slot but kept fully on-screen, and
   // flipped above the slot when there isn't room below (the your-team/enemy rows sit low on the page).
   const W = 292;
@@ -427,7 +432,9 @@ function LoadoutPopover({ data, isMySeat, owned, accent, rect }: {
         <>
           <div className="flex items-center justify-between mb-2 pb-2 border-b border-[var(--line)]">
             <span className="label" style={{ color: accent }}>◈ {data.brawler_name || "Loadout"}</span>
-            {isMySeat
+            {freeMaxed
+              ? <span className="mono text-[9px]" style={{ color: "var(--gold)" }} title="free maxed brawler this Ranked season — everything unlocked">FREE · ALL UNLOCKED</span>
+              : asInventory
               ? <span className="mono text-[9px]" style={{ color: "var(--gold)" }}>YOUR INVENTORY</span>
               : <span className="mono text-[9px] text-[var(--dim)]">{data.mode}</span>}
           </div>
@@ -436,11 +443,11 @@ function LoadoutPopover({ data, isMySeat, owned, accent, rect }: {
               vs: <span style={{ color: "var(--accent)" }}>{data.comp_reads.join(" · ")}</span>
             </div>
           )}
-          <AccSection title="GADGET" items={data.gadgets} isMySeat={isMySeat}
+          <AccSection title="GADGET" items={data.gadgets} isMySeat={asInventory}
             ownedIds={new Set(owned?.owned_gadgets ?? [])} />
-          <AccSection title="STAR POWER" items={data.star_powers} isMySeat={isMySeat}
+          <AccSection title="STAR POWER" items={data.star_powers} isMySeat={asInventory}
             ownedIds={new Set(owned?.owned_star_powers ?? [])} />
-          <GearSection gears={data.gears} isMySeat={isMySeat} ownedGears={owned?.owned_gears ?? []} />
+          <GearSection gears={data.gears} isMySeat={asInventory} ownedGears={owned?.owned_gears ?? []} />
           {data.note && (
             <div className="mono text-[9px] text-[var(--dim)] mt-2 pt-1.5 border-t border-[var(--line)] leading-snug">{data.note}</div>
           )}
@@ -1201,7 +1208,8 @@ export default function DraftBoard() {
         {canHint && b && <span aria-hidden className="mono absolute -bottom-1 -right-1 text-[8px] px-0.5 leading-none border border-[var(--line)] bg-[var(--panel2)] text-[var(--dim)] opacity-0 group-hover:opacity-100 transition-opacity">⚙</span>}
         {canHint && hovered && hoverSlot && (
           <LoadoutPopover data={loadouts[loadoutKey(bid!)]} isMySeat={isMySeat}
-            owned={ownedByBrawler.get(bid!)} accent={accent} rect={hoverSlot.rect} />
+            owned={ownedByBrawler.get(bid!)} boosted={boostedSet.has(bid!)}
+            accent={accent} rect={hoverSlot.rect} />
         )}
       </button>
     );

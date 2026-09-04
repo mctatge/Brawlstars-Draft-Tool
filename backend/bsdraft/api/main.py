@@ -781,17 +781,24 @@ class _ReqMastery:
 
 
 class _BoostedMastery:
-    """Mastery stand-in for a season's free/"boosted" brawler the player doesn't own.
+    """Mastery stand-in for a season's free/"boosted" brawler — owned or not.
 
-    Ranked hands these out fully maxed — Power 11, every star power / gadget / gear / hypercharge —
-    so ``.fielded()`` is fully ready and the brawler takes **no** readiness deficit. That is the
-    whole point: a free maxed brawler is exactly the copy the meta win rate describes.
+    Ranked hands these out fully maxed to *everyone* — Power 11, every star power / gadget / gear /
+    hypercharge — regardless of whether the player owns the brawler, or at what level. The live
+    signal in :mod:`bsdraft.engine.freebrawlers` is exactly this: *every* ranked slot for a free
+    brawler reads Power 11, with no levelling tail, which can only be true if owners field the maxed
+    loan too. So ``.fielded()`` is fully ready and the brawler takes **no** readiness deficit, and
+    ``.gaps()`` is empty — for an owned copy just as much as an unowned one. That is the whole point:
+    a free maxed brawler is exactly the copy the meta win rate describes.
 
-    ``.score`` stays 0.60 (full *build*, zero *comfort*) because it is a display-only investment
-    index and the player genuinely has no history here. It no longer touches the pick score, so the
-    old worry — that this constant quietly depressed free maxed brawlers — is gone with the term."""
-    __slots__ = ()
-    score = 0.60
+    ``.score`` is the display-only investment index. It defaults to 0.60 (full *build*, zero
+    *comfort*) for the unowned case, where the player has no history; an owned free brawler keeps its
+    real score, so the roster UI still shows the comfort the player has actually earned. Either way
+    the score no longer touches the pick score, so pricing the copy as ready costs nothing there."""
+    __slots__ = ("score",)
+
+    def __init__(self, score: float = 0.60):
+        self.score = float(score)
 
     def gaps(self) -> List[str]:
         return []
@@ -804,8 +811,9 @@ def _roster_for(req: S.RecommendRequest):
     """Roster dict ``{brawler_id: mastery-like}`` to personalize against, or None. Prefers the
     client-sent roster (the only source on the public host), then the server's own roster
     (local/home, where the IP-locked key can fetch it). This season's free/"boosted" brawlers are
-    folded in as available-at-full-loadout so they're recommendable even when unowned (an owned
-    one keeps its real mastery). Returns None unless ``personalize`` is set.
+    folded in as available-at-full-loadout so they're recommendable even when unowned — and an owned
+    copy is priced as fully maxed too, since Ranked loans everyone the maxed brawler (it keeps only
+    its real display score). Returns None unless ``personalize`` is set.
 
     The server-roster fallback applies only when the ``roster`` field is *omitted* (None). An
     explicitly sent empty list means "this player fields nothing" (the client's power-floor filter
@@ -834,7 +842,12 @@ def _roster_for(req: S.RecommendRequest):
     if roster is None:
         return None
     for bid in _free_brawler_ids():
-        roster.setdefault(bid, _BoostedMastery())  # owned free brawler keeps its real mastery
+        # Ranked loans the free brawler fully maxed to everyone, owners included, so an owned copy —
+        # even under-levelled or half-built — must be priced as ready with no gaps, not by its real
+        # deficient mastery (owning a weak copy would otherwise recommend it *worse* than not owning
+        # it). Overwrite, not setdefault; keep the owned copy's real display score for the roster UI.
+        prior = roster.get(bid)
+        roster[bid] = _BoostedMastery(prior.score if prior is not None else 0.60)
     return roster
 
 

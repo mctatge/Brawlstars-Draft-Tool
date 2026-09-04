@@ -129,6 +129,37 @@ def test_boosted_brawlers_are_added_and_clear_the_floor():
         assert bid in r
 
 
+def test_owned_boosted_brawler_is_priced_as_fully_maxed():
+    """Ranked loans a free/boosted brawler fully maxed to *owners* too, so an owned copy that is
+    under-levelled or half-built must be priced as ready with no gaps — never docked a readiness
+    deficit or flagged with a loadout gap for a copy the season hands out maxed, while its real
+    display score is preserved for the roster UI. Regression guard for the old ``setdefault`` that
+    kept an owned free brawler's real (deficient) mastery — which made owning a weak copy recommend
+    it *worse* than not owning it at all."""
+    from bsdraft.engine.readiness import GAP_NO_STAR_POWER, readiness
+    free = 90000055
+    saved = M._free_brawler_ids
+    M._free_brawler_ids = lambda: (free,)
+    try:
+        # Owned at Power 9 with a missing star power, in a floor-9 bracket so the entry SURVIVES the
+        # power gate — the deficit path only bites above the floor, which is exactly where the bug
+        # charged an owned boosted copy.
+        roster = [S.OwnedBrawler(id=free, mastery=0.42, power=9, gaps=[GAP_NO_STAR_POWER])]
+        req = S.RecommendRequest(map_id=1, mode="Brawl Ball", rank_bracket="Diamond",
+                                 personalize=True, roster=roster)
+        m = M._roster_for(req)[free]
+        assert m.gaps() == []                     # no spurious "no star power" chip
+        assert readiness(m.fielded())[0] == 0.0   # no deficit — it's the maxed loan
+        assert m.score == 0.42                     # real comfort/build preserved for display
+
+        # The unowned case is unchanged: no history, so the display score keeps its 0.60 default.
+        req2 = S.RecommendRequest(map_id=1, mode="Brawl Ball", rank_bracket="Diamond",
+                                  personalize=True, roster=[])
+        assert M._roster_for(req2)[free].score == 0.60
+    finally:
+        M._free_brawler_ids = saved
+
+
 # --- the wire contract: ``power`` must actually arrive ---------------------------
 #
 # Every gate test above hands ``_roster_for`` a roster that HAS a power on each entry. None of them

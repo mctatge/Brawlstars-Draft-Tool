@@ -575,6 +575,32 @@ def test_boosted_brawler_is_discounted_and_counts_as_fieldable():
     assert math.isclose(ref / via_boost, 2.0, rel_tol=1e-3), (ref, via_boost)
 
 
+def test_engine_wrapper_unions_data_derived_free_brawlers():
+    """The engine's ``recommend_purchases`` wrapper must feed the advisor the SAME free/"boosted"
+    union every other surface uses: the hand-maintained ``load_ranked_boosted`` list ∪ the
+    data-derived ``stats.free_brawler_ids`` carried in the stats artifact. Left to its default the
+    advisor sees only the hand list, so an unannounced mid-season free grant (the Nori case) gets no
+    boosted discount and is over-recommended as a purchase — a brawler you can already field free."""
+    import types
+    from bsdraft.engine import engine as E
+
+    captured = {}
+    saved = (E.purchases_mod.recommend_purchases, E.R.load_ranked_boosted,
+             E.itemstats_mod.get_itemstats)
+    E.purchases_mod.recommend_purchases = lambda owned, stats, **kw: captured.update(kw) or []
+    E.R.load_ranked_boosted = lambda: (111,)                        # hand-maintained list
+    E.itemstats_mod.get_itemstats = lambda: None
+    try:
+        eng = types.SimpleNamespace(
+            stats=types.SimpleNamespace(free_brawler_ids=frozenset({222})),  # data-derived, unannounced
+            bracket_stats={})
+        E.DraftEngine.recommend_purchases(eng, owned={}, rank_bracket="Mythic")
+        assert captured["boosted"] == frozenset({111, 222})
+    finally:
+        (E.purchases_mod.recommend_purchases, E.R.load_ranked_boosted,
+         E.itemstats_mod.get_itemstats) = saved
+
+
 # --- measurement, degradation, list mechanics -----------------------------------------------------
 
 def test_measured_delta_picks_a_first_item_but_scales_only_a_second():

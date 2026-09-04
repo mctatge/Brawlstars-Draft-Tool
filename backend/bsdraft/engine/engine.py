@@ -91,9 +91,17 @@ class DraftEngine:
         Delegates to :mod:`bsdraft.engine.purchases`, feeding it the stats + item win-rate table
         (the table degrades to None when unbuilt, so the advisor falls back to economy priors)."""
         stats = self.bracket_stats.get(rank_bracket, self.stats) if rank_bracket else self.stats
+        # Free/"boosted" brawlers: the same union every other surface uses — the hand-maintained
+        # list (leading signal, and the only one that knows *next* season) unioned with the
+        # data-derived set carried in the stats artifact (catches unannounced mid-season grants,
+        # e.g. Nori). Free status is global, so read it off the GLOBAL stats, not the bracket table.
+        # Without this the advisor over-recommends buying a brawler you can already field free now.
+        boosted = frozenset(R.load_ranked_boosted()) | frozenset(
+            getattr(self.stats, "free_brawler_ids", ()) or ())
         return purchases_mod.recommend_purchases(
             owned, stats, itemstats=itemstats_mod.get_itemstats(), top=top,
-            rank_bracket=rank_bracket, power_floor=power_floor, min_per_kind=min_per_kind)
+            rank_bracket=rank_bracket, power_floor=power_floor, min_per_kind=min_per_kind,
+            boosted=boosted)
 
     def composition_report(self, state: DraftState) -> dict:
         return composition_mod.analyze(state)
