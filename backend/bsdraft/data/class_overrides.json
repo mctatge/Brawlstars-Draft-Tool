@@ -1,7 +1,7 @@
 {
   "_comment": "Manual class assignments for brawlers that Brawlify's data API tags as 'Unknown' (too new to be classified there). Verified against the Brawl Stars Fandom wiki infobox 'Class=' field. Update when Brawlify catches up or new brawlers release.",
   "_source": "https://brawlstars.fandom.com/wiki/<Name>",
-  "_updated": "2026-08-08",
+  "_updated": "2026-09-05",
   "overrides": {
     "Buzz Lightyear": "Damage Dealer",
     "Meeple": "Controller",
@@ -22,6 +22,8 @@
     "Starr Nova": "Assassin",
     "Bolt": "Tank",
     "Nori": "Assassin",
-    "Wendy": "Support"
+    "Wendy": "Support",
+    "Cosmo": "Controller",
+    "Vince": "Damage Dealer"
   }
 }
