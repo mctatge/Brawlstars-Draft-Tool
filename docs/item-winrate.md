@@ -93,6 +93,18 @@ loader picks up the new file on the next request. Build against the **same refer
   mode-of-play a pooled delta can mislead (Simpson risk). Mode can be added as an extra MH stratum
   where sample allows.
 
+## Scope: mode-level, not per-map — but live to the actual draft
+
+The effect heuristic (and the comp overlay below) score against **game mode** (Bounty, Gem Grab,
+…), not the specific map. `loadout_advice()` accepts `map_id` but doesn't use it yet — reserved
+for a future per-map slice once there's a reason to believe modes aren't a good-enough bucket.
+So a brawler's gadget/star power/gear isn't a fixed per-map answer; what actually varies it
+mid-draft is the **comp overlay**: once opponents are known, `enemies=<csv>` overlays live
+class-count reads on top of the mode score. That's the mechanism behind e.g. Tick's *Last
+Hurrah* gadget picking up a `+ vs poke` chip only once 2+ ranged enemies are drafted — the same
+brawler on the same map/mode scores differently depending on who's actually in the enemy team
+slots, not on a static per-map table.
+
 ## Comp-aware overlay (heuristic, Phase 1 — 2026-08-18)
 
 `/api/loadout` accepts an optional `enemies=<csv>` param (ids of the queried brawler's opponents;

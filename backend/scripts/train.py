@@ -176,11 +176,21 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--halflife-days", type=float, default=30.0)
-    ap.add_argument("--class-synergy", action="store_true",
-                    help="add a learnable symmetric class x class within-team synergy matrix "
+    # On by default since 2026-09-03. It was `store_true`, and collect.py's unattended
+    # --retrain-on-shift argv never passed it, so every automatic retrain quietly produced a
+    # model without the term and published it — the deployed artifact lost the capability for a
+    # full retrain cycle with nothing erroring. Two other guards now back this up: collect.py
+    # names the flag explicitly, and export_model.py refuses a capability downgrade.
+    # This is only the default for NEW training runs. ModelConfig.class_synergy stays
+    # default-False deliberately: that default is deserialization semantics for checkpoints
+    # written before the term existed (the paired-baseline load below rebuilds a ModelConfig
+    # from a stored config dict, and would fail load_state_dict if "absent" meant "on").
+    ap.add_argument("--class-synergy", action=argparse.BooleanOptionalAction, default=True,
+                    help="learnable symmetric class x class within-team synergy matrix "
                          "(archetype-level; pools every same-class pairing into one estimate), "
-                         "interpretable as 'which archetype pairs win together'. The learned "
-                         "signal is weak — see docs/model-evaluation.md.")
+                         "interpretable as 'which archetype pairs win together'. On by default; "
+                         "--no-class-synergy trains without it. The learned signal is weak "
+                         "— see docs/model-evaluation.md.")
     ap.add_argument("--p-full", type=float, default=0.7,
                     help="probability a training example keeps its full 3v3 (rest are masked "
                          "to random partial draft states). 0.7 held full-comp parity with the "

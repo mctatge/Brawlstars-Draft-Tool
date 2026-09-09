@@ -210,6 +210,22 @@ Held-out validation (158,966 of 1,059,778 matches), full comps:
   inference the known picks are the *early* picks — early picks are not a perfectly random
   sample of final teams, a small conditioning mismatch that cannot be measured without pick
   order.
+- **No opponent-reaction modeling.** Nothing in the live recommend path predicts "if I pick X,
+  the opponent becomes more likely to answer with Y" — there is no dedicated per-brawler
+  reaction/psychology component. `score_candidate`'s `counter` term (`engine/scoring.py`) only
+  reads *already-drafted* enemies against the candidate; it says nothing about who gets picked
+  next. Because training masks random slots of a *finished* team and marginalizes over how real
+  historical drafts ended up (see *Partial-draft probabilities*, above), the net's win-prob
+  surface can implicitly carry real co-occurrence patterns from the data — e.g. if Edgar
+  disproportionately ends up on the opposing team in matches where Tick was drafted, that shows
+  up as a population-level statistical association, not as a live "opponents draft Y in reaction
+  to X" simulation, and it can't distinguish a genuine strategic counter from incidental
+  meta co-occurrence. The retired minimax search (above) is the closest this project got to real
+  opponent-response modeling, and it was removed as unreliable. The only place the tool predicts
+  what an opponent is *likely to pick* at all is the ban engine's `_draftability`
+  (`backend/bsdraft/engine/bans.py`) — a blend of the model's read of a brawler with its
+  map/mode use-rate — and that estimate is unconditional on your own picks, not a reaction to
+  them.
 - **No ban data.** The API never exposes bans, so the model is trained on final picks; ban
   value is inferred separately from win-rate + contest rate.
 - **Population shift.** The net is trained on the pooled crawl, whose mass sits in the middle

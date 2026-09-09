@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Dict, Iterable, List, Set, Tuple
 
 import numpy as np
 import torch
@@ -44,7 +45,69 @@ def _vocab() -> dict:
     }
 
 
-def export(pt_path: Path, npz_path: Path) -> None:
+def capability_regressions(prev_cfg: dict, prev_keys: Iterable[str],
+                           cfg: dict, new_keys: Iterable[str]) -> List[str]:
+    """Capabilities the artifact currently on disk has that this export would silently drop.
+
+    Three kinds:
+
+      * a boolean config flag flipping ``True`` -> ``False`` (or vanishing entirely);
+      * a config value that had a setting going ``None``/absent — this is how partial-draft
+        support would disappear, since ``serve.supports_partial`` is exactly
+        ``cfg["mask_row"] is not None``;
+      * a weight/buffer array present in the old export and absent from the new one.
+
+    On 2026-09-03 the live model was found to have lost its class-level within-team synergy
+    term (``class_synergy``/``class_syn``, commit 5ff34c9). Nothing was broken: ``train.py``
+    defined ``--class-synergy`` as ``store_true`` and ``collect.py``'s unattended
+    ``--retrain-on-shift`` argv never passed it, so every automatic retrain produced a model
+    without the term and ``collect.py`` published it unconditionally on training success. The
+    capability was gone from the deployed artifact for a full retrain cycle with no error
+    anywhere. This function is the structural fix: a downgrade now has to be asked for.
+
+    Keys beginning with ``_`` are export bookkeeping (``_config`` and the pinned vocabulary)
+    and are rewritten wholesale on every run, so they are never treated as capabilities.
+
+    Deliberately retiring a config field will trip the second rule. That is intended: it costs
+    one ``--allow-capability-downgrade`` and is far cheaper than the silence it replaces.
+    """
+    missing = object()
+    lost: List[str] = []
+    for k, v in sorted(prev_cfg.items()):
+        now = cfg.get(k, missing)
+        # `is True` rather than truthiness: config also carries ints (mask_row, d_hidden),
+        # and `1 == True` would make a dimension change masquerade as a lost capability.
+        if v is True and now is not True:
+            lost.append(f"config flag {k!r}: True -> "
+                        f"{'<absent>' if now is missing else repr(now)}")
+        elif v is not None and v is not True and (now is missing or now is None):
+            lost.append(f"config value {k!r}: {v!r} -> "
+                        f"{'<absent>' if now is missing else 'None'}")
+    dropped = {k for k in prev_keys if not k.startswith("_")} - set(new_keys)
+    lost.extend(f"array {k!r}: present in the current export, absent from this one"
+                for k in sorted(dropped))
+    return lost
+
+
+def _previous_export(npz_path: Path) -> Tuple[Dict, Set[str]]:
+    """``(config, array keys)`` of the artifact already at ``npz_path``.
+
+    Returns empty values when there is no previous export or it cannot be read: a missing or
+    corrupt predecessor must never block a good export. The guard exists to catch a silent
+    capability downgrade, not to gate on the health of the file it is replacing.
+    """
+    if not npz_path.exists():
+        return {}, set()
+    try:
+        with np.load(npz_path, allow_pickle=True) as z:
+            cfg = json.loads(str(z["_config"])) if "_config" in z.files else {}
+            return cfg, set(z.files)
+    except Exception as e:  # noqa: BLE001 - see docstring: never block on a bad predecessor
+        print(f"note: could not read {npz_path} for the capability check ({e}) - skipping it")
+        return {}, set()
+
+
+def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False) -> None:
     ckpt = torch.load(pt_path, map_location="cpu", weights_only=True)
     weights = {k: v.detach().cpu().numpy() for k, v in ckpt["state_dict"].items()}
     vocab = _vocab()
@@ -78,6 +141,24 @@ def export(pt_path: Path, npz_path: Path) -> None:
                 raise SystemExit(
                     f"reference catalog changed since training ({what}: live {live} != trained "
                     f"{trained}) — rerun scripts/train.py against the current reference, then export")
+    # Refuse to replace a more capable artifact with a less capable one (see
+    # capability_regressions). This is the last check before the write, so a downgrade is
+    # caught whether it came from a missing training flag, a rolled-back config, or a
+    # checkpoint from an older code path.
+    prev_cfg, prev_keys = _previous_export(npz_path)
+    lost = capability_regressions(prev_cfg, prev_keys, cfg,
+                                  set(weights) | set(vocab) | {"_config"})
+    if lost:
+        detail = "\n".join(f"  - {m}" for m in lost)
+        if not allow_downgrade:
+            raise SystemExit(
+                f"refusing to export: this checkpoint drops capabilities that the model "
+                f"already at {npz_path} has:\n{detail}\n\n"
+                f"Retrain with the flag that produces them (the unattended path in "
+                f"backend/scripts/collect.py pins --class-synergy), or pass "
+                f"--allow-capability-downgrade if the removal is deliberate.")
+        print(f"WARNING: exporting a capability downgrade (--allow-capability-downgrade):\n{detail}")
+
     np.savez(npz_path, _config=np.array(json.dumps(cfg)), **weights, **vocab)
     size_kb = npz_path.stat().st_size / 1024
     print(f"exported {pt_path}  ->  {npz_path}  ({size_kb:.1f} KB, {len(weights)} tensors "
@@ -88,10 +169,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Export winprob.pt -> winprob.npz for NumPy serving.")
     ap.add_argument("--pt", type=Path, default=DEFAULT_PT, help="input torch checkpoint")
     ap.add_argument("--npz", type=Path, default=DEFAULT_NPZ, help="output NumPy archive")
+    ap.add_argument("--allow-capability-downgrade", action="store_true",
+                    help="permit an export that drops a capability the artifact being replaced "
+                         "has (a True config flag going False, or a weight array disappearing). "
+                         "Off by default so an unattended retrain cannot silently ship a weaker "
+                         "model; turn it on for a deliberate rollback.")
     args = ap.parse_args()
     if not args.pt.exists():
         raise SystemExit(f"No checkpoint at {args.pt}. Train first: scripts/train.py")
-    export(args.pt, args.npz)
+    export(args.pt, args.npz, allow_downgrade=args.allow_capability_downgrade)
 
 
 if __name__ == "__main__":

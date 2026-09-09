@@ -252,7 +252,14 @@ def _retrain() -> None:
         # train.py trains best-of-N seeds (the gate is below the seed-noise floor); export_model.py
         # then serializes whichever candidate won.
         commands = [
+            # --class-synergy is train.py's default as of 2026-09-03, but it is named here
+            # anyway: the production capability set belongs at the unattended call site, not
+            # in a convenience default a later sweep might flip. This argv omitting the flag
+            # while it was store_true is exactly how the live model lost the term (every
+            # retrain-on-shift re-exported without it, and publish is unconditional on
+            # success). export_model.py now refuses a capability downgrade as the backstop.
             [sys.executable, str(scripts / "train.py"),
+             "--class-synergy",
              "--candidates", str(_RETRAIN_CANDIDATES),
              "--max-full-delta", str(_RETRAIN_MAX_FULL_DELTA)],
             [sys.executable, str(scripts / "export_model.py")],

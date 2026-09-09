@@ -223,6 +223,32 @@ the redundancy signal is *comparable in size to seed noise*:
   seeds — seed correlation went from +0.59 (plain) to −0.08 (regularized). Signal and noise are
   the same size; a magnitude penalty can't separate them.
 
+**It then fell out of production for a week (2026-08-27 -> 2026-09-03).** Worth recording,
+because nothing was broken and nothing errored. `--class-synergy` was declared `store_true`, and
+`scripts/collect.py`'s unattended `--retrain-on-shift` argv never passed it, so every automatic
+retrain rebuilt the model *without* the term; `collect.py` publishes on training success
+unconditionally, so each one went straight to the `data-latest` release and the live API's
+hot-swap. It was found only by loading the published `winprob.npz` and reading `_config`
+(`class_synergy: False`, no `class_syn` / `brawler_class` arrays) against `git show
+HEAD:data/processed/winprob.npz` (`True`, both arrays present). Three guards now: the flag is
+`BooleanOptionalAction` defaulting **on**, `collect.py` names it explicitly at the unattended
+call site, and `scripts/export_model.py` refuses to overwrite an artifact with one that has
+fewer capabilities (a `True` config flag going `False`, a set value going `None`/absent — which
+is how `mask_row`, i.e. partial-draft support, would vanish — or a weight array disappearing),
+unless `--allow-capability-downgrade` is passed. The refusal exits non-zero on stderr, so
+`collect.py`'s existing stalled-retrain alert picks it up. See
+`backend/tests/test_export_capability_guard.py`.
+
+Restoring it does **not** endanger the unattended retrain gate, which was the open worry — the
++0.0034 figure below is measured against the *strength+counter ablation baseline*, not against
+the previous checkpoint the gate actually compares to. Re-measured 2026-09-03 by running the
+exact production command (`--class-synergy --candidates 3 --max-full-delta 0.0035`) against the
+then-current no-synergy checkpoint on 2.27M matches: candidate deltas **+0.0005 / +0.0002 /
++0.0002**, best-of-3 chose seed 2 at **+0.0002** — comfortably inside the 0.0035 gate. The
+learned same-class diagonal reproduced the documented shape (Artillery −0.035, Support −0.041,
+Controller −0.024, Tank −0.005, Marksman and Damage Dealer positive): throwers discounted,
+tanks essentially untouched.
+
 **Shipping decision.** The plain, all-rank class-synergy term is shipped as a *gentle, honest
 nudge*: it reproducibly discounts throwers and leaves everything else ~unchanged. Cost is
 **+0.0034 full-comp val logloss / −0.008 AUC** vs. the strength+counter baseline — right at the

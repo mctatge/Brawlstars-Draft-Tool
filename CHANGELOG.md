@@ -4,6 +4,20 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-09-03
+
+- **A term the model was supposed to have had quietly gone missing from the served model.** The
+  win-probability net's class-level within-team synergy matrix — the part that knows two of the
+  same archetype are worth a little less together than apart — shipped on 2026-08-27 and then
+  vanished from every model published after it. Nothing broke and nothing errored: switching it on
+  was an opt-in training flag, the crawler's automatic retrain never passed it, and a retrain
+  publishes whenever training succeeds, so each unattended rebuild quietly produced a model
+  without the term and shipped it to the live site. It is on by default now, named explicitly in
+  the automatic retrain, and the export step refuses to replace the live model with one that has
+  fewer capabilities than it. The effect on recommendations was small — the term mostly discounts
+  stacked throwers and barely touches stacked tanks — but it was invisible, which is the part
+  worth fixing.
+
 ## 2026-08-28
 
 - **The draft no longer recommends a brawler it has no data on.** A pick was only ever as good as
