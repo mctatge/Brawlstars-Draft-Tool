@@ -107,4 +107,6 @@ Each is an **explicit, tunable parameter** in the engine — exposed in the UI a
 - ~~**"buffies"**~~ → resolved: a real per-brawler API field, handled in the mastery layer (§3.3).
 - **Python version** — 3.9.6 present; recommend 3.11+ (code kept 3.9-compatible where cheap).
 - **Deployment target** for Phase 5 (Vercel + a Python host? single Docker? local-only?).
-- **Map geometry** (walls/bushes/lanes) — out of scope for v1 model; candidate for a later refinement.
+- **Map geometry in the learned model** (walls/bushes/lanes) remains out of scope: match rows have
+  no positional data. The post-draft game plan may use explicitly curated openings for profiled
+  maps (with mode-level fallbacks elsewhere); those directions are rules, never model output.

@@ -24,6 +24,10 @@ export type BanRec = {
 };
 export type Warning = { text: string; severity: string };
 export type RoleTip = { name: string; cls: string; role: string };
+export type AssignmentTip = {
+  name: string; cls: string; start: string; position: string; job: string;
+  tracks?: string | null; adjust?: string;
+};
 export type ThreatTip = { name: string; cls: string; tip: string };
 export type EnemyRead = { archetype: string; playstyle: string; clash: string };
 // One of your brawlers' win rate on this map. `tag` is anchor / solid / weak.
@@ -60,6 +64,8 @@ export type GamePlan = {
   // Optional because the frontend and the API deploy separately: a Pages build can go live
   // against a Render instance that predates these fields, so the panel must read them
   // defensively (`?? []`) rather than assume they're on the wire.
+  formation?: string;
+  assignments?: AssignmentTip[];
   enemy?: EnemyRead | null;
   map_read?: MapForm[];
   pairs?: PairRate[];

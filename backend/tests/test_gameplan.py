@@ -10,6 +10,9 @@ Stub stats keep the assertions off the live dataset.
 """
 from __future__ import annotations
 
+from itertools import permutations
+
+from bsdraft.api.schemas import GamePlan as GamePlanSchema
 from bsdraft.engine.gameplan import MIN_CELL_GAMES, MIN_MAP_GAMES, game_plan
 from bsdraft.engine.state import DraftState
 
@@ -19,6 +22,16 @@ EL_PRIMO = 16000010                                      # Tank
 MODE, MAP = "Knockout", 15000001
 
 FULL = dict(map_id=MAP, mode=MODE, our_team=[SHELLY, COLT, BULL], their_team=[JESSIE, DYNAMIKE, MORTIS])
+
+SPROUT, RT = 16000037, 16000066                          # Artillery, Damage Dealer
+GRIFF, BIBI, ASH = 16000050, 16000026, 16000051          # Controller, Tank, Tank
+PARALLEL_PLAYS = 15000293
+PARALLEL_FULL = dict(
+    map_id=PARALLEL_PLAYS,
+    mode="Hot Zone",
+    our_team=[SPROUT, RT, BULL],
+    their_team=[GRIFF, BIBI, ASH],
+)
 
 
 class _Rate:
@@ -60,6 +73,180 @@ class _Model:
     def prob(self, our, their, map_id, mode):
         self.calls += 1
         return self._prob
+
+
+def _assignments_by_name(plan):
+    return {assignment["name"]: assignment for assignment in plan["assignments"]}
+
+
+# --- the structured opening-assignment contract ---
+
+def test_parallel_plays_assigns_exact_opening_jobs_and_rt_tracks_bibi_without_stats():
+    """The motivating draft must be actionable even without the measured data layer."""
+    gp = game_plan(DraftState(**PARALLEL_FULL))
+    assignments = _assignments_by_name(gp)
+    trackers = [a for a in gp["assignments"] if a["tracks"] is not None]
+
+    assert gp["formation"]
+    assert set(assignments) == {"Sprout", "R-T", "Bull"}
+    assert [a["name"] for a in trackers] == ["R-T"]
+    assert assignments["R-T"]["start"] == "home_zone"
+    assert assignments["R-T"]["tracks"] == "Bibi"
+    assert assignments["Bull"]["start"] == "away_zone"
+    assert assignments["Bull"]["tracks"] is None
+    assert "R-T" in assignments["Bull"]["adjust"]
+    assert "Bibi" in assignments["Bull"]["adjust"]
+    assert assignments["Sprout"]["start"] == "flex"
+    assert assignments["Sprout"]["tracks"] is None
+    assert assignments["Sprout"]["adjust"] == ""
+    assert all(a["position"] and a["job"] for a in assignments.values())
+    assert "bottom-left" in assignments["R-T"]["job"]
+    assert "full reset or respawn" in assignments["R-T"]["adjust"]
+    assert "hold far until R-T starts crossing" in assignments["Bull"]["adjust"]
+    assert "center fence" in assignments["Sprout"]["job"]
+    assert "unless the enemy can finish near" in gp["formation"]
+
+
+def test_parallel_plays_curated_tracker_beats_adverse_full_head_to_head_data():
+    counters = {
+        (ours, theirs): (0.90, 500.0)
+        for ours in PARALLEL_FULL["our_team"]
+        for theirs in PARALLEL_FULL["their_team"]
+    }
+    counters[(RT, BIBI)] = (0.10, 500.0)
+
+    gp = game_plan(DraftState(**PARALLEL_FULL), _StubStats(counters=counters))
+    trackers = [a for a in gp["assignments"] if a["tracks"] is not None]
+
+    assert gp["head_to_head"]["best"]["ours"] != "R-T"
+    assert [(a["name"], a["tracks"]) for a in trackers] == [("R-T", "Bibi")]
+
+
+def test_head_to_head_results_never_become_positional_instructions():
+    counters = {
+        (ours, theirs): (0.46, 500.0)
+        for ours in FULL["our_team"]
+        for theirs in FULL["their_team"]
+    }
+    counters[(SHELLY, JESSIE)] = (0.65, 5000.0)
+
+    gp = game_plan(DraftState(**FULL), _StubStats(counters=counters))
+
+    assert gp["head_to_head"]["best"]["games"] == 5000.0
+    assert gp["head_to_head"]["best"]["edge"] == "strong"
+    assert all(a["tracks"] is None for a in gp["assignments"])
+    assert all(a["adjust"] == "" for a in gp["assignments"])
+
+
+def test_measured_map_form_does_not_move_rule_based_opening_jobs():
+    state = DraftState(**FULL)
+    expected = {a["name"]: a["start"] for a in game_plan(state)["assignments"]}
+    stats = _StubStats(map_rates={
+        SHELLY: (0.90, 5000.0),
+        COLT: (0.10, 5000.0),
+        BULL: (0.50, 5000.0),
+    })
+
+    actual = {a["name"]: a["start"] for a in game_plan(state, stats)["assignments"]}
+
+    assert actual == expected
+
+
+def test_parallel_plays_assignments_do_not_depend_on_request_order():
+    """Draft-slot order is UI state, not a tactical signal; the same six names get the same jobs."""
+    expected = {
+        name: (assignment["start"], assignment["tracks"])
+        for name, assignment in _assignments_by_name(
+            game_plan(DraftState(**PARALLEL_FULL))
+        ).items()
+    }
+
+    for our_team in permutations(PARALLEL_FULL["our_team"]):
+        for their_team in permutations(PARALLEL_FULL["their_team"]):
+            state = DraftState(
+                map_id=PARALLEL_PLAYS,
+                mode="Hot Zone",
+                our_team=list(our_team),
+                their_team=list(their_team),
+            )
+            actual = {
+                name: (assignment["start"], assignment["tracks"])
+                for name, assignment in _assignments_by_name(game_plan(state)).items()
+            }
+            assert actual == expected
+
+
+def test_parallel_plays_blind_pick_keeps_positions_but_drops_matchup_targets():
+    gp = game_plan(DraftState(
+        map_id=PARALLEL_PLAYS,
+        mode="Hot Zone",
+        our_team=list(PARALLEL_FULL["our_team"]),
+    ))
+    assignments = _assignments_by_name(gp)
+
+    assert {name: a["start"] for name, a in assignments.items()} == {
+        "R-T": "home_zone",
+        "Bull": "away_zone",
+        "Sprout": "flex",
+    }
+    assert all(a["tracks"] is None and a["adjust"] == "" for a in assignments.values())
+
+
+def test_unknown_hot_zone_map_uses_mode_jobs_without_fabricating_coordinates():
+    gp = game_plan(DraftState(
+        map_id=99999999,
+        mode="Hot Zone",
+        our_team=list(PARALLEL_FULL["our_team"]),
+        their_team=list(PARALLEL_FULL["their_team"]),
+    ))
+
+    starts = {a["start"] for a in gp["assignments"]}
+    assert starts == {"zone_anchor", "off_angle", "flex"}
+    assert not ({"home_zone", "away_zone"} & starts)
+    rendered = " ".join([
+        gp["formation"],
+        *(a["position"] for a in gp["assignments"]),
+        *(a["job"] for a in gp["assignments"]),
+    ]).lower()
+    assert "bottom-left" not in rendered and "top-right" not in rendered
+
+
+def test_partial_team_has_no_formation_or_assignments():
+    for our_team in ([], [SPROUT], [SPROUT, RT]):
+        gp = game_plan(DraftState(
+            map_id=PARALLEL_PLAYS,
+            mode="Hot Zone",
+            our_team=our_team,
+            their_team=list(PARALLEL_FULL["their_team"]),
+        ))
+        assert gp["formation"] == ""
+        assert gp["assignments"] == []
+
+
+def test_parallel_plays_geometry_is_guarded_by_mode():
+    gp = game_plan(DraftState(
+        map_id=PARALLEL_PLAYS,
+        mode="Knockout",
+        our_team=list(PARALLEL_FULL["our_team"]),
+        their_team=list(PARALLEL_FULL["their_team"]),
+    ))
+
+    starts = {a["start"] for a in gp["assignments"]}
+    assert starts == {"safe_sightline", "crossfire", "trade"}
+    assert not ({"home_zone", "away_zone"} & starts)
+    assert "bottom-left" not in gp["formation"].lower()
+    assert "top-right" not in gp["formation"].lower()
+
+
+def test_game_plan_schema_serialization_retains_structured_assignments():
+    wire = GamePlanSchema(**game_plan(DraftState(**PARALLEL_FULL))).model_dump()
+    assignments = {assignment["name"]: assignment for assignment in wire["assignments"]}
+
+    assert wire["formation"]
+    assert assignments["R-T"]["start"] == "home_zone"
+    assert assignments["R-T"]["tracks"] == "Bibi"
+    assert assignments["Bull"]["start"] == "away_zone"
+    assert assignments["Sprout"]["start"] == "flex"
 
 
 def test_no_stats_or_model_is_the_legacy_heuristic_plan():
@@ -226,3 +413,5 @@ def test_oversized_teams_are_truncated_not_walked():
     assert len(gp["head_to_head"]["grid"]) == 3
     assert all(len(r["vs"]) == 3 for r in gp["head_to_head"]["grid"])
     assert len(gp["map_read"]) == 3 and len(gp["pairs"]) == 3
+    assert len(gp["assignments"]) == 3
+    assert {a["name"] for a in gp["assignments"]} == {"Shelly", "Colt", "Bull"}

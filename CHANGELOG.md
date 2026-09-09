@@ -4,6 +4,15 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-09-09
+
+- **The post-draft plan now tells each brawler where to start and when to swap.** Finished teams
+  get three concrete opening jobs instead of only class labels: an objective position, what to do
+  there, and—when the curated map matchup calls for it—which enemy route to match. Parallel Plays
+  has the first exact map profile: bottom-left near anchor, top-right pressure, center flex,
+  coordinated swaps when an enemy changes zones, and a full collapse once the near zone is fully
+  captured. Other maps receive mode-specific jobs without fabricated geometry.
+
 ## 2026-09-03
 
 - **A term the model was supposed to have had quietly gone missing from the served model.** The

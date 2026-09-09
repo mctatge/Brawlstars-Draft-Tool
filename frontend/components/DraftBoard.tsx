@@ -1896,6 +1896,8 @@ function GamePlanPanel({ gp, blind }: { gp: GamePlan; blind?: boolean }) {
   const h2h = gp.head_to_head;
   const mapRead = gp.map_read ?? [];
   const pairs = gp.pairs ?? [];
+  const assignments = gp.assignments ?? [];
+  const hasAssignmentSwap = assignments.some((a) => Boolean(a.adjust));
   const ourNames = h2h?.grid[0]?.vs.map((c) => c.name) ?? [];
   const hasData = !!(h2h || mapRead.length > 0 || pairs.length > 0);
   // Every chip prints the sample behind it — the panel claims its numbers are measured, so a
@@ -1946,22 +1948,60 @@ function GamePlanPanel({ gp, blind }: { gp: GamePlan; blind?: boolean }) {
         </div>
       )}
 
-      <div className="grid md:grid-cols-2 gap-x-6 gap-y-4">
-        <div>
-          <div className="label mb-2">Your roles</div>
-          <div className="space-y-1.5">
-            {gp.roles.map((r) => (
-              <div key={r.name} className="text-[12px]">
-                <span className="font-semibold" style={{ color: CLASS_COLOR[r.cls] || "#aaa" }}>{r.name}</span>
-                <span className="mono text-[11px] text-[var(--muted)]"> / {r.role}</span>
+      {assignments.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-baseline gap-2 mb-1 flex-wrap">
+            <div className="label" style={{ color: "var(--blue)" }}>◤ Opening assignments</div>
+            <div className="mono text-[9px] tracking-[0.08em] text-[var(--dim)]">
+              {hasAssignmentSwap ? "SET POSITIONS, THEN SWAP AS A TEAM" : "SET YOUR OPENING POSITIONS"}
+            </div>
+          </div>
+          {gp.formation && <div className="text-[13px] leading-snug mb-3 max-w-5xl">{gp.formation}</div>}
+          <div className="mono text-[10px] text-[var(--muted)] mb-3 leading-snug">
+            <span className="text-[var(--dim)] tracking-[0.1em]">TEAM SHAPE · </span>{gp.playstyle}
+          </div>
+          <div className="grid md:grid-cols-3 gap-px p-px bg-[var(--line)]">
+            {assignments.map((a) => (
+              <div key={a.name} className="p-3 bg-[var(--panel2)] min-w-0">
+                <div className="mono text-[9px] tracking-[0.12em] mb-1.5" style={{ color: "var(--blue)" }}>{a.position}</div>
+                <div className="text-[13px] font-semibold mb-1" style={{ color: CLASS_COLOR[a.cls] || "#aaa" }}>{a.name}</div>
+                <div className="text-[12px] text-[var(--muted)] leading-snug">{a.job}</div>
+                {a.adjust && (
+                  <div className="mt-2 pt-2 border-t border-[var(--line)] text-[11px] text-[var(--muted)] leading-snug">
+                    <span className="mono text-[9px] tracking-[0.1em] mr-1.5" style={{ color: "var(--gold)" }}>
+                      ↔ {a.tracks ? `MATCH ${a.tracks}` : "SWAP COVER"}
+                    </span>
+                    <span className="mono text-[9px] tracking-[0.08em] mr-1.5 text-[var(--dim)]">MAP RULE</span>
+                    {a.adjust}
+                  </div>
+                )}
               </div>
             ))}
           </div>
-          <div className="mono text-[11px] text-[var(--muted)] mt-2 italic">{gp.playstyle}</div>
+          <div className="mono text-[9px] text-[var(--dim)] mt-1.5 leading-snug">
+            POSITIONS AND SWAPS ARE CURATED MAP/MODE RULES—NOT LEARNED MOVEMENT OR 1V1 GUARANTEES.
+          </div>
         </div>
-        <div>
+      )}
+
+      <div className="grid md:grid-cols-2 gap-x-6 gap-y-4">
+        {assignments.length === 0 && (
+          <div>
+            <div className="label mb-2">Your roles</div>
+            <div className="space-y-1.5">
+              {gp.roles.map((r) => (
+                <div key={r.name} className="text-[12px]">
+                  <span className="font-semibold" style={{ color: CLASS_COLOR[r.cls] || "#aaa" }}>{r.name}</span>
+                  <span className="mono text-[11px] text-[var(--muted)]"> / {r.role}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mono text-[11px] text-[var(--muted)] mt-2 italic">{gp.playstyle}</div>
+          </div>
+        )}
+        <div className={assignments.length > 0 ? "md:col-span-2" : ""}>
           <div className="label mb-2" style={{ color: "var(--red)" }}>Vs their threats</div>
-          <div className="space-y-1.5">
+          <div className={assignments.length > 0 ? "grid md:grid-cols-3 gap-x-6 gap-y-2" : "space-y-1.5"}>
             {gp.threats.length === 0 && <div className="mono text-[11px] text-[var(--muted)]">{blind ? "ENEMY HIDDEN IN BLIND PICK — FOCUS YOUR OWN COMP." : "NO ENEMY PICKS ON THE BOARD YET."}</div>}
             {gp.threats.map((t) => (
               <div key={t.name} className="text-[12px]">
@@ -1976,8 +2016,8 @@ function GamePlanPanel({ gp, blind }: { gp: GamePlan; blind?: boolean }) {
       <div className="mt-4 pt-3 border-t border-[var(--line)]">
         <div className="label mb-1">◆ Standard mode &amp; role strategy</div>
         <div className="mono text-[10px] text-[var(--dim)] mb-3 leading-snug">
-          RULE-BASED, NOT LEARNED — THE MATCH DATA IS DRAFT-TO-OUTCOME ONLY, WITH NO POSITIONS OR TIMINGS,
-          SO NOTHING IN IT COULD TEACH A MODEL HOW TO PLAY THE MODE. THE ROLES AND THREAT TIPS ABOVE ARE THIS HALF TOO.
+          RULE-BASED, NOT LEARNED — EXACT POSITIONS ARE HAND-AUTHORED ONLY FOR PROFILED MAPS; OTHER MAPS USE MODE JOBS.
+          THE PER-CLASS EXECUTION AND THREAT TIPS ABOVE ARE THIS HALF TOO.
         </div>
         <div className="grid md:grid-cols-3 gap-x-6 gap-y-4">
           <Section label="Do" color="var(--green)" mark="✓" items={gp.tips} />

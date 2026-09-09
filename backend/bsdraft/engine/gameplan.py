@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from bsdraft.constants import TEAM_SIZE
+from bsdraft.engine import positioning
 from bsdraft.engine.scoring import _class_of, _name_map
 from bsdraft.engine.state import DraftState
 
@@ -353,17 +354,19 @@ def game_plan(state: DraftState, stats=None, model=None) -> dict:
     real draft; a real board can never exceed three a side anyway.
     """
     names = _name_map()
-    our_cls = [_class_of(b) for b in state.our_team[:TEAM_SIZE]]
+    our_ids = state.our_team[:TEAM_SIZE]
+    their_ids = state.their_team[:TEAM_SIZE]
+    our_cls = [_class_of(b) for b in our_ids]
     archetype, playstyle = _archetype(our_cls)
     plan = MODE_PLAN.get(state.mode, {"objective": "", "tips": [], "avoid": []})
 
     roles = [
         {"name": names.get(b, str(b)), "cls": _class_of(b),
          "role": ROLE_BY_CLASS.get(_class_of(b), ROLE_BY_CLASS["Unclassified"])}
-        for b in state.our_team[:TEAM_SIZE]
+        for b in our_ids
     ]
     threats = []
-    for e in state.their_team[:TEAM_SIZE]:
+    for e in their_ids:
         cls = _class_of(e)
         tip = THREAT_BY_CLASS.get(cls)
         if tip:
@@ -375,7 +378,7 @@ def game_plan(state: DraftState, stats=None, model=None) -> dict:
         compensate.append("No frontline — you can't contest space head-on; poke and kite, don't get dived.")
     if our_cls and not any(c in ("Marksman", "Controller", "Artillery") for c in our_cls):
         compensate.append("No long range — close distance fast and avoid poke wars you'll lose.")
-    if sum(1 for b in state.their_team[:TEAM_SIZE] if _class_of(b) == "Tank") >= 2 and "Marksman" not in our_cls:
+    if sum(1 for b in their_ids if _class_of(b) == "Tank") >= 2 and "Marksman" not in our_cls:
         compensate.append("Enemy is tank-heavy — kite relentlessly, chip them down, never get cornered.")
 
     tone = _TONE.get(archetype, "Stay flexible")
@@ -385,24 +388,40 @@ def game_plan(state: DraftState, stats=None, model=None) -> dict:
     # Their shape only reads as a shape once two of them are on the board; one pick is a brawler,
     # not a comp. Blind pick (no enemy revealed) skips this entirely.
     enemy = None
-    if len(state.their_team[:TEAM_SIZE]) >= 2:
-        their_arch, their_style = _archetype([_class_of(b) for b in state.their_team[:TEAM_SIZE]])
+    if len(their_ids) >= 2:
+        their_arch, their_style = _archetype([_class_of(b) for b in their_ids])
         enemy = {"archetype": their_arch, "playstyle": their_style,
                  "clash": _CLASH.get((archetype, their_arch), "")}
+
+    # Compute each measured table once for the evidence panel. Opening positions deliberately do
+    # not consume these team-outcome rates: they cannot establish lane or rotation causality.
+    map_read = _map_read(state, stats, names) if stats is not None else []
+    pairs = _pairs(state, stats, names) if stats is not None else []
+    head_to_head = _head_to_head(state, stats, names) if stats is not None else None
+    allies = [{"id": b, "name": names.get(b, str(b)), "cls": _class_of(b)} for b in our_ids]
+    enemies = [{"id": b, "name": names.get(b, str(b)), "cls": _class_of(b)} for b in their_ids]
+    formation, assignments = positioning.opening_plan(
+        map_id=state.map_id,
+        mode=state.mode,
+        allies=allies,
+        enemies=enemies,
+    )
 
     return {
         "objective": plan["objective"],
         "win_condition": win_condition,
         "archetype": archetype,
         "playstyle": playstyle,
+        "formation": formation,
+        "assignments": assignments,
         "roles": roles,
         "threats": threats,
         "tips": plan["tips"],
         "avoid": plan["avoid"],
         "compensate": compensate,
         "enemy": enemy,
-        "map_read": _map_read(state, stats, names) if stats is not None else [],
-        "pairs": _pairs(state, stats, names) if stats is not None else [],
-        "head_to_head": _head_to_head(state, stats, names) if stats is not None else None,
+        "map_read": map_read,
+        "pairs": pairs,
+        "head_to_head": head_to_head,
         "model_read": _model_read(state, model),
     }

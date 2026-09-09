@@ -135,6 +135,17 @@ class RoleTip(BaseModel):
     role: str
 
 
+class AssignmentTip(BaseModel):
+    """One brawler's opening position, job, and optional matchup-driven rotation."""
+    name: str
+    cls: str
+    start: str                     # stable semantic key, e.g. home_zone / flex
+    position: str                  # user-facing position label
+    job: str
+    tracks: Optional[str] = None   # one exact, hand-authored map-matchup assignment
+    adjust: str = ""
+
+
 class ThreatTip(BaseModel):
     name: str
     cls: str
@@ -214,6 +225,8 @@ class GamePlan(BaseModel):
     win_condition: str = ""
     archetype: str = ""
     playstyle: str = ""
+    formation: str = ""
+    assignments: List[AssignmentTip] = []
     roles: List[RoleTip] = []
     threats: List[ThreatTip] = []
     tips: List[str] = []
