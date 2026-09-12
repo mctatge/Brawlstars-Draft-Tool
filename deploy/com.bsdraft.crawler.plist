@@ -7,8 +7,9 @@
   3. launchctl load ~/Library/LaunchAgents/com.bsdraft.crawler.plist     # start
      launchctl unload ~/Library/LaunchAgents/com.bsdraft.crawler.plist   # stop
 
-  The crawler uses your IP-locked Supercell key (from .env) and publishes matches.jsonl.gz
-  to the GitHub Release the deployed API pulls from. Logs go to data/raw/crawl.{out,err}.log.
+  The crawler uses your IP-locked Supercell key (from .env), publishes the release artifacts
+  the deployed API pulls from, and dispatches the GitHub Actions model retrain when drift trips.
+  Logs go to data/raw/crawl.{out,err}.log.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -24,7 +25,7 @@
     <string>--target</string>
     <string>800</string>
     <string>--publish</string>
-    <string>--retrain-on-shift</string>
+    <string>--dispatch-retrain-on-shift</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/ABSOLUTE/PATH/TO/Brawlstars-Draft-Tool</string>

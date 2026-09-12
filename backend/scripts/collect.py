@@ -7,8 +7,8 @@
     # home daemon for the live site: crawl a batch, publish, sleep, repeat:
     PYTHONPATH=backend python backend/scripts/collect.py --loop 3600 --target 800 --publish
 
-    # …and auto-retrain the model whenever the meta shifts (balance change / new brawler):
-    PYTHONPATH=backend python backend/scripts/collect.py --loop 3600 --target 800 --publish --retrain-on-shift
+    # …and dispatch the heavy retrain to GitHub Actions whenever the meta shifts:
+    PYTHONPATH=backend python backend/scripts/collect.py --loop 3600 --target 800 --publish --dispatch-retrain-on-shift
 
 Resumable: re-running continues from the existing matches/visited state in data/raw/. Pass
 --publish to upload matches.jsonl.gz to a GitHub Release (see collect/publish.py) so the
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -133,13 +134,15 @@ def _publish_rank_index() -> None:
             print(f"rank index publish failed ({path.name}): {e}")
 
 
-def _check_meta(retrain_on_shift: bool, publish: bool = False) -> None:
+def _check_meta(retrain_on_shift: bool, publish: bool = False,
+                dispatch_retrain_on_shift: bool = False) -> None:
     """Run the meta-drift detector on the freshly crawled data and print the report. The report
     is written to data/processed/meta_report.json and (with ``publish``) uploaded so the live
     API SERVES it instead of recomputing drift per data change — two streaming passes over the
-    full dataset, minutes on the free tier's CPU sliver. When the meta has shifted and
-    ``--retrain-on-shift`` is set, kick a model retrain so recommendations catch up. Never
-    raises — a drift hiccup must not kill a long crawl loop."""
+    full dataset, minutes on the free tier's CPU sliver. When the meta has shifted, the crawler
+    can either kick the legacy local retrain or dispatch the GitHub Actions retrain workflow so
+    recommendations catch up without a laptop memory spike. Never raises — a drift hiccup must
+    not kill a long crawl loop."""
     try:
         report = detect_drift()
     except Exception as e:  # noqa: BLE001
@@ -153,8 +156,11 @@ def _check_meta(retrain_on_shift: bool, publish: bool = False) -> None:
             publisher.publish_meta_report()
     except Exception as e:  # noqa: BLE001 — a report hiccup shouldn't kill a long crawl loop
         print(f"meta report publish failed: {e}")
-    if report.shifted and retrain_on_shift:
-        _retrain()
+    if report.shifted:
+        if dispatch_retrain_on_shift:
+            _trigger_remote_retrain(report)
+        elif retrain_on_shift:
+            _retrain()
 
 
 # A retrain can fail the same way every hour — most often train.py's --max-full-delta gate
@@ -166,6 +172,9 @@ def _check_meta(retrain_on_shift: bool, publish: bool = False) -> None:
 _RETRAIN_STATE_PATH = PROCESSED_DIR / "retrain_state.json"
 _RETRAIN_ALERT_AFTER = 3       # ~3h at the default --loop 3600 — past a transient
 _RETRAIN_REALERT_EVERY = 24    # and once a day after that, so a long stall keeps nagging
+_RETRAIN_DISPATCH_STATE_PATH = PROCESSED_DIR / "retrain_dispatch_state.json"
+_RETRAIN_DISPATCH_WORKFLOW = "retrain-model.yml"
+_RETRAIN_DISPATCH_COOLDOWN_HOURS = 24.0
 
 # Best-of-N seeds for the unattended retrain. The paired full-comp delta swings more between
 # seeds (~0.0035, measured by gate_experiment.py 2026-08-23) than train.py's 0.002 gate, so a
@@ -189,6 +198,99 @@ def _retrain_state() -> dict:
         return json.loads(_RETRAIN_STATE_PATH.read_text())
     except Exception:  # noqa: BLE001 — absent or corrupt state just starts a fresh streak
         return {}
+
+
+def _retrain_dispatch_state() -> dict:
+    try:
+        return json.loads(_RETRAIN_DISPATCH_STATE_PATH.read_text())
+    except Exception:  # noqa: BLE001 — absent or corrupt state just means nothing was sent
+        return {}
+
+
+def _report_fingerprint(report) -> str:
+    """Stable identity for a shifted-meta report, intentionally ignoring exact win-rate deltas.
+
+    The report's rates drift slightly as each hourly crawl adds matches; including them would
+    turn one balance patch into a new fingerprint every cycle. What matters for dispatch dedupe is
+    the set of new brawlers and the brawlers whose direction crossed the threshold.
+    """
+    payload = {
+        "new_brawlers": sorted(int(b) for b in getattr(report, "new_brawlers", [])),
+        "shifts": sorted(
+            (int(s.brawler_id), str(s.kind))
+            for s in getattr(report, "shifts", [])
+        ),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+def _dispatch_cooldown_hours() -> float:
+    raw = os.environ.get("BSDRAFT_RETRAIN_DISPATCH_COOLDOWN_HOURS")
+    if raw is None:
+        return _RETRAIN_DISPATCH_COOLDOWN_HOURS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        print(f"invalid BSDRAFT_RETRAIN_DISPATCH_COOLDOWN_HOURS={raw!r}; "
+              f"using {_RETRAIN_DISPATCH_COOLDOWN_HOURS:g}h")
+        return _RETRAIN_DISPATCH_COOLDOWN_HOURS
+
+
+def _parse_utc(ts: str) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _trigger_remote_retrain(report, reason: str = "meta_shift",
+                            now: datetime | None = None) -> bool:
+    """Dispatch the GitHub Actions retrain workflow once per shifted-meta fingerprint.
+
+    The crawler runs hourly and a drift report can remain shifted for a week, so the trigger is
+    persisted across process restarts and debounced. A changed fingerprint (for example a new
+    brawler appears) bypasses the cooldown; the same fingerprint retries only after the cooldown.
+    """
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    fingerprint = _report_fingerprint(report)
+    state = _retrain_dispatch_state()
+    last_fp = str(state.get("last_fingerprint", ""))
+    last_sent = _parse_utc(str(state.get("last_dispatched_at", "")))
+    cooldown = _dispatch_cooldown_hours()
+    if last_fp == fingerprint and last_sent is not None:
+        age_hours = (now - last_sent).total_seconds() / 3600.0
+        if age_hours < cooldown:
+            print("meta shifted -> retrain workflow already dispatched "
+                  f"{age_hours:.1f}h ago for fingerprint {fingerprint}; "
+                  f"cooldown is {cooldown:g}h")
+            return False
+
+    workflow = os.environ.get("BSDRAFT_RETRAIN_WORKFLOW", _RETRAIN_DISPATCH_WORKFLOW)
+    print(f"meta shifted -> dispatching GitHub Actions workflow {workflow} "
+          f"(fingerprint {fingerprint})")
+    res = publisher._gh(
+        "workflow", "run", workflow,
+        "-f", f"reason={reason}",
+        "-f", f"report_fingerprint={fingerprint}",
+    )
+    if res.returncode != 0:
+        print(f"retrain workflow dispatch failed: {res.stderr.strip() or res.stdout.strip()}")
+        return False
+
+    try:
+        _RETRAIN_DISPATCH_STATE_PATH.write_text(json.dumps({
+            "last_fingerprint": fingerprint,
+            "last_dispatched_at": now.isoformat().replace("+00:00", "Z"),
+            "last_reason": reason,
+            "workflow": workflow,
+        }, indent=2), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001 — dispatch succeeded; bookkeeping is best-effort
+        print(f"retrain dispatch state write failed: {e}")
+    print("remote retrain dispatched; Actions will publish the model only if training/export pass")
+    return True
 
 
 def _record_retrain(ok: bool, detail: str = "") -> int:
@@ -291,7 +393,8 @@ def _retrain() -> None:
 
 
 async def _loop(target: int, countries: list, interval: int, do_publish: bool,
-                meta_check: bool, retrain_on_shift: bool, revisit_after: float) -> None:
+                meta_check: bool, retrain_on_shift: bool, revisit_after: float,
+                dispatch_retrain_on_shift: bool) -> None:
     cycle = 0
     while True:
         cycle += 1
@@ -304,7 +407,8 @@ async def _loop(target: int, countries: list, interval: int, do_publish: bool,
                 _publish_stats()
                 _publish_rank_index()
             if meta_check:
-                _check_meta(retrain_on_shift, publish=do_publish)
+                _check_meta(retrain_on_shift, publish=do_publish,
+                            dispatch_retrain_on_shift=dispatch_retrain_on_shift)
         except AuthError as e:
             # Alert but don't die (launchd would respawn us into the same wall) and don't
             # publish — retry next cycle in case the allow-list gets fixed meanwhile.
@@ -334,6 +438,9 @@ def main() -> None:
                     help="skip the meta-drift report after each crawl (on by default)")
     ap.add_argument("--retrain-on-shift", action="store_true",
                     help="when the meta-drift check trips, retrain + re-export the win-prob model")
+    ap.add_argument("--dispatch-retrain-on-shift", action="store_true",
+                    help="when the meta-drift check trips, dispatch the GitHub Actions retrain "
+                         "workflow instead of training on this machine")
     ap.add_argument("--revisit-hours", type=float, default=None,
                     help="re-scan a known player after this many hours to catch their newer "
                          "ranked games (default: .env CRAWL_REVISIT_HOURS; 0 disables)")
@@ -346,18 +453,22 @@ def main() -> None:
 
     if args.loop > 0 and not args.publish:
         print("note: --loop without --publish — crawling locally only; the live site won't update.")
+    if args.retrain_on_shift and args.dispatch_retrain_on_shift:
+        raise SystemExit("choose only one of --retrain-on-shift or --dispatch-retrain-on-shift")
 
     try:
         if args.loop > 0:
             asyncio.run(_loop(args.target, countries, args.loop, args.publish,
-                              args.meta_check, args.retrain_on_shift, revisit_after))
+                              args.meta_check, args.retrain_on_shift, revisit_after,
+                              args.dispatch_retrain_on_shift))
         else:
             asyncio.run(_run(args.target, countries, revisit_after))
             _clear_stalled()
             if args.publish:
                 _try_publish()
             if args.meta_check:
-                _check_meta(args.retrain_on_shift, publish=args.publish)
+                _check_meta(args.retrain_on_shift, publish=args.publish,
+                            dispatch_retrain_on_shift=args.dispatch_retrain_on_shift)
     except AuthError as e:  # loop mode handles this per-cycle; one-shot fails loudly
         _alert_stalled(e)
         sys.exit(2)

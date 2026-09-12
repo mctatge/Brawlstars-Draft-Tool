@@ -39,6 +39,16 @@ PYTHONPATH=backend python backend/scripts/export_stats.py             # precompu
 PYTHONPATH=backend python backend/scripts/export_rank_index.py        # precomputed tag→tier rank index (rank_index.npz; the cloud LOADS it — ~66 MB peak vs ~200 MB+ building in RAM)
 ```
 
+Live crawler loop (home machine): keep collection and artifact publishing local, but dispatch
+heavy model retrains to GitHub Actions on drift instead of training on the Mac:
+
+```bash
+PYTHONPATH=backend python backend/scripts/collect.py --loop 3600 --target 800 --publish --dispatch-retrain-on-shift
+```
+
+Use `--retrain-on-shift` only when you deliberately want the crawler process itself to run
+PyTorch training locally.
+
 Other scripts under `backend/scripts/`:
 
 - `smoke_test.py` — verify the API key works + inspect real response shapes.

@@ -4,9 +4,9 @@ name: keep-warm
 #   * ping — every ~10 min, hit /api/health so the free Render instance doesn't sleep.
 #   * meta-alert — once a day, hit /api/meta and open a GitHub issue when the meta has
 #     shifted or a new brawler is in play (the drift detector's signal — see
-#     backend/bsdraft/engine/drift.py). The crawler auto-retrains the model on a shift
-#     (--retrain-on-shift); the issue is the human signal, mainly for the new-brawler case,
-#     which needs a manual refresh_reference.py + retrain + commit.
+#     backend/bsdraft/engine/drift.py). The crawler dispatches retrain-model.yml on a shift;
+#     the issue is the human signal, mainly for the new-brawler case, which needs a manual
+#     refresh_reference.py + retrain + commit.
 #   * balance-watch — once a day, scrape Supercell's official release-notes blog directly
 #     (backend/bsdraft/collect/patchnotes.py) and open a 'balance-change' issue when the notes
 #     change. This is the *leading* signal: drift.py can only infer a patch from match data
@@ -136,9 +136,10 @@ jobs:
               echo "|---|---|---|---|"
               echo "$SHIFTS"
               echo
-              echo "The home crawler retrains + republishes the model automatically on a shift"
-              echo "(\`--retrain-on-shift\`); recency-weighted stats self-correct. Check"
-              echo "\`data/raw/crawl.out.log\` on the home machine to confirm the retrain ran."
+              echo "The home crawler dispatches \`retrain-model.yml\` automatically on a shift"
+              echo "(\`--dispatch-retrain-on-shift\`); recency-weighted stats self-correct."
+              echo "Check Actions for the retrain run and \`data/raw/crawl.out.log\` on the"
+              echo "home machine to confirm the dispatch happened."
               echo
             fi
             echo "_Close this issue to acknowledge; a new one is filed at most every 10 days._"

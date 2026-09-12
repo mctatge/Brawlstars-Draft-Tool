@@ -191,7 +191,7 @@ npm --prefix frontend install && npm --prefix frontend run dev  # → http://loc
 The live site costs **$0/mo** and refreshes its data while in use. The constraint is the
 IP-locked API key: the **crawler stays on a machine whose IP is on the key's allow-list** and
 *publishes* data to a GitHub Release; a free cloud API *pulls* it on an interval and hot-swaps
-rebuilt stats — no restart, and no key in the cloud.
+rebuilt stats/model artifacts — no restart, and no key in the cloud.
 
 ```text
 your machine            GitHub Release           Render (free)        Cloudflare Pages
@@ -216,13 +216,20 @@ Render's free 512 MB tier and cold-starts fast; PyTorch is used only for *traini
 4. **Keep it warm.** Free instances sleep after ~15 min idle; set repo variable
    `RENDER_HEALTH_URL` = `<render-url>/api/health` to enable
    [`keepwarm.yml`](.github/workflows/keepwarm.yml).
-5. **Run the home crawler** so data keeps flowing:
+5. **Run the home crawler** so data keeps flowing and drift-triggered retrains run in GitHub
+   Actions instead of on your machine:
    ```bash
-   PYTHONPATH=backend python backend/scripts/collect.py --loop 3600 --target 800 --publish
+   PYTHONPATH=backend python backend/scripts/collect.py --loop 3600 --target 800 --publish --dispatch-retrain-on-shift
    ```
    Or install it as a login agent (macOS): edit the paths in
    [`deploy/com.bsdraft.crawler.plist`](deploy/com.bsdraft.crawler.plist), copy to
    `~/Library/LaunchAgents/`, then `launchctl load` it.
+
+6. **Model retrains.** A shifted meta dispatches
+   [`retrain-model.yml`](.github/workflows/retrain-model.yml), which downloads the published
+   dataset, runs `train.py --class-synergy --candidates 3 --max-full-delta 0.0035`, exports
+   `winprob.npz`, and uploads the model only if the regression/capability gates pass. This keeps
+   the laptop crawler light while preserving the no-regression release path.
 
 > **Tradeoffs.** The site stays up on the cloud, but data only advances while your crawler
 > machine is on (watch `matches` / `last_change` at `/api/health`). **Roster/mastery
