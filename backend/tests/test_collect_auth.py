@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 import bsdraft.collect.crawler as crawler_mod
+import bsdraft.collect.profiles as profiles_mod
 from bsdraft.collect.client import AuthError, BrawlStarsError
 from bsdraft.collect.crawler import Crawler
 
@@ -102,6 +103,23 @@ def test_seed_propagates_auth_error():
         except AuthError:
             return
         raise AssertionError("seed swallowed the AuthError")
+
+
+def test_profile_auth_error_aborts_without_marking_tag(monkeypatch, tmp_path):
+    class ProfileClient:
+        async def get_player(self, tag: str) -> dict:
+            raise AuthError(403, "accessDenied.invalidIp")
+
+    monkeypatch.setattr(profiles_mod, "PROFILES_PATH", tmp_path / "profiles.jsonl")
+    monkeypatch.setattr(profiles_mod, "PROFILED_PATH", tmp_path / "profiled_tags.txt")
+    collector = profiles_mod.ProfileCollector(ProfileClient(), revisit_days=21)
+    try:
+        asyncio.run(collector.run(["AAA"], limit=1))
+    except AuthError:
+        pass
+    else:
+        raise AssertionError("ProfileCollector swallowed the AuthError")
+    assert not (tmp_path / "profiled_tags.txt").read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":

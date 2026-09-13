@@ -89,6 +89,38 @@ def test_accessory_added_and_renamed():
     assert d.safe_to_automerge          # additive + rename only
 
 
+def test_accessory_description_change_is_reported():
+    after = [brawler(1, "Shelly", sp=[(101, "Shell Shock")],
+                     gadgets=[(201, "Fast Forward")]), BASE[1]]
+    after[0]["gadgets"][0]["description"] = "Shelly dashes forward."
+    d = C.diff_catalogs(BASE, after)
+    changes = [c for c in d.accessory_changes if c.change == "description"]
+    assert len(changes) == 1
+    assert changes[0].old_description == ""
+    assert changes[0].new_description == "Shelly dashes forward."
+    assert d.safe_to_automerge
+    assert "description updated" in d.summary()
+
+
+def test_refresh_accessory_details_preserves_catalog_membership():
+    current = {"list": [brawler(1, "Shelly", gadgets=[(201, "Fast Forward")])]}
+    current["list"][0]["gadgets"][0]["description"] = "Old description."
+    current["list"].append(brawler(99, "LocalOnly", gadgets=[(999, "Local Gadget")]))
+    live = {"list": [brawler(1, "Shelly", gadgets=[(201, "New Name")]),
+                      brawler(2, "New Brawler", gadgets=[(202, "New Gadget")])]}
+    live["list"][0]["gadgets"][0].update({
+        "path": "New-Name", "description": "Current description.",
+        "descriptionHtml": "Current description.", "imageUrl": "current.png",
+    })
+    notes = C.refresh_accessory_details(current, live)
+    item = current["list"][0]["gadgets"][0]
+    assert item["name"] == "New Name"
+    assert item["description"] == "Current description."
+    assert current["list"][1]["name"] == "LocalOnly"
+    assert current["list"][1]["gadgets"][0]["name"] == "Local Gadget"
+    assert len(notes) == 1 and "description" in notes[0]
+
+
 def test_accessory_removal_blocks_automerge():
     after = [brawler(1, "Shelly", sp=[(101, "Shell Shock")], gadgets=[]),  # gadget gone
              BASE[1]]

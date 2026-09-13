@@ -36,14 +36,16 @@ _FIT_PER_DELTA = 3.0
 # Each gadget/star power is bucketed into one effect by scanning its description for keywords.
 # Order matters: the first matching bucket wins, so the list is tuned "headline effect first"
 # (a dash-that-also-reloads reads as mobility) and DAMAGE sits late because many descriptions
-# mention "damage" only incidentally ("deals x damage").
+# mention "damage" only incidentally ("deals x damage"). Matching is word-aware: raw substring
+# matching turned "removes" into mobility via the word "moves", and catalog value tokens such as
+# ``speedReducePercent`` into movement effects.
 _EFFECT_KEYWORDS = [
     ("mobility", ("dash", "dashes", "jump", "jumps", "leap", "teleport", "sprint", "roll",
-                  "faster", "speed", "charges forward", "moves to", "moves ", "hop")),
-    ("reload",   ("reload", "reloads", "ammo", "ammunition")),
+                  "charges forward", "moves to", "moves faster", "movement speed", "hop")),
+    ("reload",   ("reload", "reloads", "ammo", "ammunition", "attack speed")),
     ("sustain",  ("heal", "heals", "healing", "restore", "restores", "shield", "regenerat",
-                  "regain", "invulnerab", "immune")),
-    ("control",  ("slow", "slows", "stun", "stuns", "freeze", "frozen", "knock", "push",
+                  "regain", "invulnerab", "immune", "immunity")),
+    ("control",  ("slow", "slows", "slowing", "stun", "stuns", "freeze", "frozen", "knock", "push",
                   "pushes", "pull", "pulls", "root", "snare", "silence")),
     ("vision",   ("vision", "reveal", "reveals", "bush", "bushes", "detect")),
     ("damage",   ("damage", "deals", "pierc", "poison", "burn", "explo", "destroy")),
@@ -51,6 +53,17 @@ _EFFECT_KEYWORDS = [
     # incidentally ("+damage at max range"), so a real damage/effect keyword should win first.
     ("range",    ("range", "longer", "farther", "further", "reach")),
 ]
+# A few kits alter Super availability without using any of the ordinary effect words above.
+# Keep this as phrase matching rather than adding bare "charge" to the keyword buckets: phrases
+# such as "Super charging area" describe where an ability works, not an item that charges Super.
+_SUPER_CHARGE_RE = re.compile(
+    r"\b(?:re)?charg(?:e|es|ed|ing)\b[^.!?]{0,40}\bsuper\b"
+    r"|\bcharg(?:e|es|ed|ing)\s+up\b[^.!?]{0,40}\bsuper\b"
+    r"|\bsuper\s+(?:charge|charging)\s+rate\b"
+    r"|\bsuper\s+(?:fully\s+)?charged\b"
+    r"|\bsuper\b[^.!?]{0,24}\brecharged\b",
+    re.IGNORECASE,
+)
 _EFFECT_META = {
     "mobility": ("Mobility", "reposition, engage, or escape"),
     "reload":   ("Reload / ammo", "more attack uptime and burst"),
@@ -59,6 +72,8 @@ _EFFECT_META = {
     "vision":   ("Vision", "reveal enemies in bushes"),
     "range":    ("Range", "poke from a safer distance"),
     "damage":   ("Damage", "raw damage output"),
+    "super_charge": ("Super charge", "get your Super online sooner"),
+    "projectile_defense": ("Projectile defense", "deny incoming shots and cross firing lanes"),
     "utility":  ("Utility", "situational value"),
 }
 # How valuable each effect is per mode (0..1). Absent effects fall back to _NEUTRAL. Kept in sync
@@ -67,18 +82,39 @@ _EFFECT_META = {
 _NEUTRAL = 0.35
 _MODE_EFFECT = {
     "Gem Grab":   {"sustain": 0.80, "control": 0.75, "reload": 0.60, "vision": 0.60,
-                   "mobility": 0.50, "damage": 0.50, "range": 0.50},
+                   "mobility": 0.50, "damage": 0.50, "range": 0.50,
+                   "projectile_defense": 0.65},
     "Brawl Ball": {"mobility": 0.85, "control": 0.70, "damage": 0.60, "sustain": 0.55,
-                   "reload": 0.50, "range": 0.45, "vision": 0.45},
+                   "reload": 0.50, "range": 0.45, "vision": 0.45,
+                   "projectile_defense": 0.75},
     "Knockout":   {"sustain": 0.80, "control": 0.70, "vision": 0.65, "range": 0.62,
-                   "damage": 0.58, "reload": 0.55, "mobility": 0.55},
+                   "damage": 0.58, "reload": 0.55, "mobility": 0.55,
+                   "projectile_defense": 0.70},
     "Heist":      {"damage": 0.85, "reload": 0.75, "mobility": 0.60, "range": 0.52,
-                   "control": 0.50, "sustain": 0.45, "vision": 0.35},
+                   "control": 0.50, "sustain": 0.45, "vision": 0.35,
+                   "projectile_defense": 0.45},
     "Hot Zone":   {"control": 0.80, "sustain": 0.75, "damage": 0.60, "reload": 0.55,
-                   "mobility": 0.50, "vision": 0.50, "range": 0.50},
+                   "mobility": 0.50, "vision": 0.50, "range": 0.50,
+                   "projectile_defense": 0.70},
     "Bounty":     {"range": 0.80, "damage": 0.70, "vision": 0.65, "mobility": 0.55,
-                   "sustain": 0.55, "control": 0.55, "reload": 0.55},
+                   "sustain": 0.55, "control": 0.55, "reload": 0.55,
+                   "projectile_defense": 0.65},
 }
+# A faster Super is broad tempo: especially useful for objective pressure and Brawl Ball, less
+# decisive than raw damage in Heist and Bounty. This is a prior, not a measured item read.
+_SUPER_CHARGE_MODE = {
+    "Gem Grab": 0.62, "Brawl Ball": 0.70, "Knockout": 0.64,
+    "Heist": 0.55, "Hot Zone": 0.65, "Bounty": 0.60,
+}
+_PROJECTILE_DEFENSE_RE = re.compile(
+    r"\b(?:destroy|destroys|destroying)\b[^.!?]{0,30}\bincoming\s+projectiles?\b",
+    re.IGNORECASE,
+)
+_DIRECT_DAMAGE_RE = re.compile(
+    r"\b(?:damage|damages|deals|poison|poisons|burn|burns|explode|explodes|explosion)\b",
+    re.IGNORECASE,
+)
+_PREFIX_KEYWORDS = frozenset(("explo", "pierc", "regenerat", "invulnerab", "destroy"))
 
 # ---- enemy-comp overlay ----------------------------------------------------------------------
 # Comp-aware adjustment on top of the mode fit: enemy class counts fire coarse "reads" (all
@@ -141,14 +177,36 @@ def _num(x, default: float = 0.0) -> float:
 
 
 def _classify(description: str) -> str:
-    d = (description or "").lower()
+    # Remove the catalog's unfilled value tokens before matching. Besides making the text shown to
+    # users cleaner, this prevents fields such as ``speedReducePercent`` from looking like a
+    # movement effect and lets Super-charge phrases span a removed numeric token.
+    d = _clean(description).lower()
+    # A few gadgets trade damage for a faster Super. Only let an explicit Super-charge phrase
+    # win when the description has no direct damage payload; Darryl's spin, for example, deals
+    # damage and recharges his Super, so it should remain a damage gadget.
+    if _SUPER_CHARGE_RE.search(d) and not _DIRECT_DAMAGE_RE.search(d):
+        return "super_charge"
+    if _PROJECTILE_DEFENSE_RE.search(d):
+        return "projectile_defense"
     for effect, keywords in _EFFECT_KEYWORDS:
-        if any(k in d for k in keywords):
+        if any(_keyword_match(d, k) for k in keywords):
             return effect
     return "utility"
 
 
+def _keyword_match(text: str, keyword: str) -> bool:
+    """Match a catalog phrase without letting it fire inside another word or value token."""
+    token = keyword.strip().lower()
+    if not token:
+        return False
+    if token in _PREFIX_KEYWORDS:
+        return bool(re.search(rf"\b{re.escape(token)}", text))
+    return bool(re.search(rf"\b{re.escape(token)}\b", text))
+
+
 def _mode_fit(effect: str, mode: str) -> float:
+    if effect == "super_charge":
+        return _SUPER_CHARGE_MODE.get(mode, _NEUTRAL)
     return _MODE_EFFECT.get(mode, {}).get(effect, _NEUTRAL)
 
 

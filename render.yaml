@@ -41,6 +41,10 @@ services:
       # meta banner and the keep-warm meta alert).
       - key: META_REPORT_URL
         value: https://github.com/mctatge/Brawlstars-Draft-Tool/releases/download/data-latest/meta_report.json
+      # Per-item win-rate artifact, built from home-collected ownership profiles. The API only
+      # loads this small file; thin or missing cells continue to use the heuristic fallback.
+      - key: ITEMSTATS_URL
+        value: https://github.com/mctatge/Brawlstars-Draft-Tool/releases/download/data-latest/itemstats.json.gz
       - key: REFRESH_SECONDS
         value: "600"
       # Cap the stats build to the most recent N matches so it fits the 512 MB free tier as the

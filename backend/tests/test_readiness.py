@@ -20,7 +20,7 @@ from bsdraft.engine.readiness import Fielded, readiness
 from bsdraft.engine.scoring import DEFAULT_WEIGHTS, PickScore, score_candidate
 from bsdraft.engine.state import DraftState
 
-SHELLY, COLT, BULL = 16000000, 16000001, 16000002
+SHELLY, COLT, BULL, GUS, RT = 16000000, 16000001, 16000002, 16000061, 16000066
 MODE, MAP = "Brawl Ball", 15000001
 
 
@@ -106,6 +106,44 @@ def test_hypercharge_is_surfaced_but_unpriced():
     assert str(hc[0].points) == "0.0"
 
 
+def test_three_missing_buffies_are_individually_explained_and_priced():
+    """Availability + explicit ownership closes the old ambiguity. The flat prior is deliberately
+    conservative and each functional slot remains visible rather than becoming an opaque bundle."""
+    f = Fielded(buffies={slot: False for slot in RD.BUFFIE_SLOTS})
+    deficit, reasons = readiness(f, buffies_available=True)
+    assert deficit == pytest.approx(3 * RD.MISSING_BUFFIE)
+    assert [r.label for r in reasons] == [
+        RD.GAP_NO_GADGET_BUFFIE, RD.GAP_NO_STAR_BUFFIE, RD.GAP_NO_HYPER_BUFFIE,
+    ]
+    assert [r.points for r in reasons] == pytest.approx([-0.01, -0.01, -0.01])
+    assert {r.source for r in reasons} == {RD.ESTIMATED}
+
+
+def test_unknown_or_unavailable_buffies_are_neutral():
+    # Old roster schema: no ownership field. Never reinterpret a missing wire value as all false.
+    assert readiness(Fielded(buffies=None), buffies_available=True) == (0.0, [])
+    # Current roster, but a brawler outside the curated availability set (e.g. R-T).
+    explicit_none = Fielded(buffies={slot: False for slot in RD.BUFFIE_SLOTS})
+    assert readiness(explicit_none, buffies_available=False) == (0.0, [])
+
+
+def test_partial_buffie_object_penalizes_only_explicit_false_values():
+    # A partial upstream rollout must not invent the two absent slots as missing.
+    f = Fielded(buffies={"gadget": False})
+    deficit, reasons = readiness(f, buffies_available=True)
+    assert deficit == pytest.approx(RD.MISSING_BUFFIE)
+    assert [r.label for r in reasons] == [RD.GAP_NO_GADGET_BUFFIE]
+
+
+def test_hyper_buffie_is_not_double_charged_below_its_power_gate():
+    f = Fielded(power=10, buffies={slot: False for slot in RD.BUFFIE_SLOTS})
+    deficit, reasons = readiness(f, buffies_available=True)
+    assert deficit == pytest.approx(RD.power_deficit_table()[10] + 2 * RD.MISSING_BUFFIE)
+    labels = [r.label for r in reasons]
+    assert RD.GAP_NO_GADGET_BUFFIE in labels and RD.GAP_NO_STAR_BUFFIE in labels
+    assert RD.GAP_NO_HYPER_BUFFIE not in labels
+
+
 def test_missing_loadout_is_estimated_not_measured():
     _, reasons = readiness(Fielded(has_starpower=False, has_gadget=False))
     assert {x.source for x in reasons} == {RD.ESTIMATED}
@@ -186,6 +224,27 @@ def test_under_leveled_copies_score_strictly_below_the_base():
     p11 = _score(SHELLY, stats, {SHELLY: _Entry(Fielded(power=11))})
     assert p9.score < p10.score < p11.score == base
     assert p9.score == pytest.approx(base - RD.power_deficit_table()[9])
+
+
+def test_gus_all_false_buffies_move_the_personalized_score_by_three_points():
+    """The full scorer—not only the arithmetic helper—must join candidate availability to roster
+    ownership. This is the exact user report that motivated the feature."""
+    stats = _StubStats({GUS: 0.62}, {GUS: 0.58})
+    f = Fielded(buffies={slot: False for slot in RD.BUFFIE_SLOTS})
+    p = _score(GUS, stats, {GUS: _Entry(f)})
+    assert p.readiness == pytest.approx(3 * RD.MISSING_BUFFIE)
+    assert p.score == pytest.approx(p.base_score - 3 * RD.MISSING_BUFFIE)
+    assert [r.label for r in p.readiness_reasons] == [
+        RD.GAP_NO_GADGET_BUFFIE, RD.GAP_NO_STAR_BUFFIE, RD.GAP_NO_HYPER_BUFFIE,
+    ]
+
+
+def test_r_t_all_false_buffies_are_neutral_in_the_full_scorer():
+    stats = _StubStats({RT: 0.62}, {RT: 0.58})
+    f = Fielded(buffies={slot: False for slot in RD.BUFFIE_SLOTS})
+    p = _score(RT, stats, {RT: _Entry(f)})
+    assert p.readiness == 0.0 and p.readiness_reasons == []
+    assert p.score == p.base_score
 
 
 def test_score_stays_inside_zero_and_one():
@@ -295,9 +354,11 @@ def test_api_roster_stand_ins_all_expose_a_readiness_view():
     import bsdraft.api.main as M
     from bsdraft.engine.mastery import Mastery
 
-    req = M._ReqMastery(0.5, [RD.GAP_NO_STAR_POWER], power=9, n_gears=1)
+    buffies = {"gadget": False, "star_power": True, "hypercharge": False}
+    req = M._ReqMastery(0.5, [RD.GAP_NO_STAR_POWER], power=9, n_gears=1,
+                        buffies=buffies)
     assert req.fielded() == Fielded(power=9, has_starpower=False, has_gadget=True,
-                                    n_gears=1, has_hypercharge=True)
+                                    n_gears=1, has_hypercharge=True, buffies=buffies)
 
     # A boosted brawler arrives fully maxed, so it must take no deficit at all.
     assert M._BoostedMastery().fielded() == Fielded.ready()
@@ -309,8 +370,25 @@ def test_api_roster_stand_ins_all_expose_a_readiness_view():
 
 
 def test_roster_schema_is_declared_and_monotonic():
-    assert isinstance(S.ROSTER_SCHEMA, int) and S.ROSTER_SCHEMA >= 2
+    assert S.ROSTER_SCHEMA == 3
     assert S.RosterResponse(loaded=True, tag="X", name="Y").roster_schema == S.ROSTER_SCHEMA
+
+
+def test_buffies_wire_distinguishes_unknown_from_explicit_none_owned():
+    old = S.OwnedBrawler(id=SHELLY, mastery=0.5)
+    assert old.buffies is None
+    current = S.OwnedBrawler(
+        id=SHELLY, mastery=0.5,
+        buffies={"gadget": False, "star_power": False, "hypercharge": False},
+    )
+    dumped = current.model_dump()
+    assert dumped["buffies"] == {
+        "gadget": False, "star_power": False, "hypercharge": False,
+    }
+    partial = S.OwnedBuffies(gadget=False)
+    assert partial.model_dump(exclude_none=True) == {"gadget": False}
+    with pytest.raises(ValueError):
+        S.OwnedBuffies(gadget=False, star_power=False, hypercharge=False, cosmetic=True)
 
 
 if __name__ == "__main__":

@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     # heuristic per item where the sample is thin. The home machine builds + publishes it (see
     # scripts/export_itemstats.py, which needs the collected profiles). Unset = heuristic only.
     itemstats_url: str = ""
+    # Home-only ownership crawl used to build itemstats.json.gz. Keep the batch bounded so the
+    # hourly crawler steadily accumulates coverage instead of profiling every historical tag at once.
+    itemstats_profile_limit: int = 500
+    itemstats_profile_recent_days: float = 35.0
+    itemstats_profile_revisit_days: float = 21.0
     refresh_seconds: int = 600  # re-sync interval in seconds (0 disables the refresh loop)
     # Comma-separated allowed CORS origins. "*" allows any (fine for the read-only meta API).
     # Lock this to your site's origin on the roster host you expose via the tunnel, e.g.

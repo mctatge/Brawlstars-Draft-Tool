@@ -27,7 +27,7 @@ from typing import Dict, Iterable, Iterator, List
 
 from tqdm import tqdm
 
-from bsdraft.collect.client import BrawlStarsClient, BrawlStarsError, normalize_tag
+from bsdraft.collect.client import AuthError, BrawlStarsClient, BrawlStarsError, normalize_tag
 from bsdraft.config import settings
 from bsdraft.constants import RAW_DIR
 from bsdraft.engine.mastery import parse_roster
@@ -43,9 +43,10 @@ DEFAULT_REVISIT_DAYS = 21.0
 
 def owned_summary(player: dict) -> dict:
     """Compact per-brawler ownership for one player: ``{brawler_id: {sp:[ids], gd:[ids],
-    gr:[[id,name,level],...], hc:bool, ht:int}}``. Reuses :func:`parse_roster` (the same parser the
-    live roster uses) so the owned-item ids stay defined in one place. Brawlers the player owns but
-    has no items on are still included — a zero-count is the inference's baseline, not missing data."""
+    gr:[[id,name,level],...], hc:bool, bf:{gadget,star_power,hypercharge}|null, ht:int}}``. Reuses
+    :func:`parse_roster` (the same parser the live roster uses) so ownership stays defined in one
+    place. Brawlers the player owns but has no items on are still included — a zero-count is the
+    inference's baseline, not missing data."""
     out: Dict[str, dict] = {}
     for bid, m in parse_roster(player).items():
         out[str(bid)] = {
@@ -63,6 +64,10 @@ def owned_summary(player: dict) -> dict:
             # who own one on brawler X but not Y), which is what the power-deficit estimator in
             # :mod:`bsdraft.data.readiness_build` cannot measure from matches alone.
             "hc": bool(m.has_hypercharge),
+            # Same irrecoverability as hypercharge: the match log has no Buffy field. Preserve
+            # ``None`` vs explicit all-false so an old/missing API shape is never recoded as three
+            # missing functional items in a future ownership-outcome estimator.
+            "bf": m.buffies,
             "ht": int(m.highest_trophies or 0),
         }
     return out
@@ -143,6 +148,10 @@ class ProfileCollector:
                     continue
                 try:
                     player = await self.client.get_player(tag)
+                except AuthError:
+                    # A bad token or rotated home IP invalidates the whole queue. Do not turn a
+                    # global 401/403 into thousands of silently skipped profiles.
+                    raise
                 except BrawlStarsError:
                     continue   # transient (e.g. a 403 IP-rotation outage) — DON'T mark profiled, so
                                # a good tag isn't skipped for the whole revisit window; retry next run

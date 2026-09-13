@@ -11,6 +11,8 @@ brawler is added, retrain so it gets a real embedding row, then publish + commit
 
     PYTHONPATH=backend python backend/scripts/refresh_reference.py             # fetch + write
     PYTHONPATH=backend python backend/scripts/refresh_reference.py --dry-run   # report only
+    PYTHONPATH=backend python backend/scripts/refresh_reference.py --accessories-only
+        # refresh existing gadget/star-power details without changing brawler/map vocabularies
 
     PYTHONPATH=backend python backend/scripts/train.py \\
       && PYTHONPATH=backend python backend/scripts/export_model.py \\
@@ -20,6 +22,7 @@ brawler is added, retrain so it gets a real embedding row, then publish + commit
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 from typing import Dict, List
@@ -27,7 +30,13 @@ from typing import Dict, List
 import httpx
 
 from bsdraft.constants import RANKED_MODES, REFERENCE_DIR
-from bsdraft.data.catalog import CATALOG_HOSTS, diff_catalogs, fetch_catalog, validate as _validate
+from bsdraft.data.catalog import (
+    CATALOG_HOSTS,
+    diff_catalogs,
+    fetch_catalog,
+    refresh_accessory_details,
+    validate as _validate,
+)
 
 # ``api.brawlify.com`` began bot-blocking automated requests (HTTP 403 "Security Check");
 # ``api.brawlapi.com`` serves the identical payload. Both are tried in order — see
@@ -79,7 +88,8 @@ def _write_atomic(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
-def refresh(brawlers_url: str = BRAWLERS_URL, maps_url: str = MAPS_URL, dry_run: bool = False) -> bool:
+def refresh(brawlers_url: str = BRAWLERS_URL, maps_url: str = MAPS_URL, dry_run: bool = False,
+            accessories_only: bool = False) -> bool:
     """Fetch + validate both catalogs, report the diff vs the local snapshots, and (unless
     dry_run) rewrite them. Returns True iff a new brawler was detected."""
     b_path = REFERENCE_DIR / "brawlers.json"
@@ -90,6 +100,21 @@ def refresh(brawlers_url: str = BRAWLERS_URL, maps_url: str = MAPS_URL, dry_run:
     before_m = _ranked_map_names(_current_list(m_path))
 
     b_payload = _fetch_list(brawlers_url, "brawlers")
+    if accessories_only:
+        merged = {"list": copy.deepcopy(before_list)}
+        detail_changes = refresh_accessory_details(merged, b_payload)
+        print(f"existing accessory details: {len(detail_changes)} change(s)")
+        for note in detail_changes:
+            print(f"  {note}")
+        if dry_run:
+            print("\n--dry-run: no files written.")
+            return False
+        if detail_changes:
+            _write_atomic(b_path, merged)
+            print(f"\nwrote {b_path} (existing brawlers/accessories only)")
+        else:
+            print("  (no existing accessory details changed)")
+        return False
     m_payload = _fetch_list(maps_url, "maps")
     after_list = _validate(b_payload, "brawlers")
     after_b = _brawler_names(after_list)
@@ -136,11 +161,15 @@ def refresh(brawlers_url: str = BRAWLERS_URL, maps_url: str = MAPS_URL, dry_run:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Refresh data/reference/{brawlers,maps}.json from Brawlify.")
     ap.add_argument("--dry-run", action="store_true", help="report what would change; don't write")
+    ap.add_argument("--accessories-only", action="store_true",
+                    help="refresh names/descriptions for existing accessories without adding "
+                         "brawlers or changing maps")
     ap.add_argument("--brawlers-url", default=BRAWLERS_URL, help="override the brawlers catalog URL")
     ap.add_argument("--maps-url", default=MAPS_URL, help="override the maps catalog URL")
     args = ap.parse_args()
     try:
-        refresh(args.brawlers_url, args.maps_url, dry_run=args.dry_run)
+        refresh(args.brawlers_url, args.maps_url, dry_run=args.dry_run,
+                accessories_only=args.accessories_only)
     except (httpx.HTTPError, ValueError) as e:
         raise SystemExit(f"refresh failed: {e}")
 

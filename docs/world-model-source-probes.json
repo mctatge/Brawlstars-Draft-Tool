@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "catalog": {
+    "path": "data/reference/maps.json",
+    "sha256": "ed9ac99b657ee37a646667a086d2dd0027edb4d7a814bbb9bf53e52228780428"
+  },
+  "probes": [
+    {
+      "map_id": 15000072,
+      "map_name": "Bridge Too Far",
+      "mode": "Heist",
+      "catalog_map_version": 1,
+      "source_uri": "https://cdn.brawlify.com/maps/regular/15000072.png",
+      "retrieved_at": "2026-09-10T00:06:19Z",
+      "sha256": "f28011e1ea840fca1a1b5c9d2517fa4c2bf41fb9a36ee11d387c37ffd0c70cec",
+      "byte_length": 18388,
+      "width_px": 690,
+      "height_px": 1050,
+      "candidate_pixels_per_cell": 30,
+      "candidate_grid_width": 23,
+      "candidate_grid_height": 35,
+      "semantic_status": "unverified",
+      "source_bytes_committed": false
+    }
+  ]
+}

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Brawler, PickRec, BanRec, Reference, RecommendResponse, Warning, RosterResponse, GamePlan, Health, Meta, RankInfo, TopPick,
-  LoadoutResponse, LoadoutItem, OwnedBrawler,
+  LoadoutResponse, LoadoutItem, OwnedBrawler, ReadinessReason,
   getReference, getRoster, recommend, getHealth, getMeta, getRank, getTopPicks, getLoadout, warmPersonal,
 } from "@/lib/api";
 import AdSlot from "@/components/AdSlot";
@@ -97,7 +97,11 @@ function pickReason(r: PickRec): string {
   if (r.synergy != null) c.push([r.synergy - 0.5, "synergy with your team"]);
   c.push([r.map_winrate - 0.5, "top winrate on this map"]);
   if (r.personal_winrate != null && (r.personal_games ?? 0) >= 3) c.push([(r.personal_winrate - 0.5) * 1.1, "your proven pick"]);
-  if (r.mastery != null) c.push([(r.mastery - 0.5) * 0.7, "high mastery"]);
+  // Mastery is display-only investment context, and can still be high from trophies after the
+  // readiness layer finds a material build deficit. Do not let that context headline the card as
+  // "high mastery" while the same card is warning that this copy is under-built.
+  const underBuilt = (r.readiness ?? 0) > 0.00005 || (r.gaps || []).some((g) => g.includes("buffie"));
+  if (r.mastery != null && !underBuilt) c.push([(r.mastery - 0.5) * 0.7, "high mastery"]);
   if (r.win_prob != null) c.push([(r.win_prob - 0.5) * 0.8, "the model favors it"]);
   c.sort((a, b) => b[0] - a[0]);
   return c[0] && c[0][0] > 0.004 ? c[0][1] : "balanced pick here";
@@ -135,15 +139,109 @@ function pickSignals(r: PickRec): { k: string; v: number }[] {
   if (r.personal_winrate != null) s.push({ k: "YOU", v: r.personal_winrate });
   return s;
 }
-// Loadout gaps ("no star power") abbreviated for the half-width columns, which can't fit the full
-// string. The row tooltip keeps the long form; the score now docks for them via the readiness deficit.
+// Build gaps abbreviated for the half-width columns, which can't fit the full string. The row
+// tooltip keeps the long form; priced gaps already move the score through the readiness deficit.
 const GAP_SHORT: Record<string, string> = {
   "no star power": "SP",
   "no gadget": "GDG",
   "no hypercharge": "HC",
+  "no gadget buffie": "G-BFY",
+  "no star buffie": "SP-BFY",
+  "no hyper buffie": "HC-BFY",
 };
 function gapTags(gaps: string[] | undefined): string[] {
   return (gaps || []).map((g) => GAP_SHORT[g] || g.replace(/^no /, "").toUpperCase());
+}
+
+type PickLiability = Omit<ReadinessReason, "points"> & { points: number | null };
+const liabilityKey = (label: string) => label.trim().toLowerCase();
+const isBuffieLiability = (r: PickLiability) => liabilityKey(r.label).includes("buffie");
+
+// New backends send readiness reasons with the exact score movement. Older ones only sent `gaps`.
+// Merge them by label so deploy skew keeps the warning without ever rendering it twice.
+function pickLiabilities(r: PickRec): PickLiability[] {
+  const reasons: PickLiability[] = (r.readiness_reasons || []).map((reason) => ({ ...reason }));
+  const seen = new Set(reasons.map((reason) => liabilityKey(reason.label)));
+  for (const gap of r.gaps || []) {
+    if (!seen.has(liabilityKey(gap))) reasons.push({ label: gap, points: null, source: "unknown" });
+  }
+  return reasons;
+}
+
+function adjustmentLabel(points: number | null, source?: string): string | null {
+  if (points == null) return null;
+  if (Math.abs(points) < 0.00005) return source === "unpriced" ? "UNPRICED" : "0.0PP";
+  return `${points < 0 ? "−" : "+"}${Math.abs(points * 100).toFixed(1)}PP`;
+}
+
+function liabilityTitle(reason: PickLiability): string {
+  const amount = adjustmentLabel(reason.points, reason.source);
+  const provenance = reason.source === "measured"
+    ? "measured from ranked matches"
+    : reason.source === "estimated"
+      ? "estimated build adjustment"
+      : reason.source === "unpriced"
+        ? "ownership is known, but there is no reliable effect estimate yet"
+        : "missing from your copy";
+  return `${reason.label}${amount ? ` · ${amount}` : ""} · ${provenance}`;
+}
+
+// One compact marker for runners-up. Prefer the Buffy-specific read when present so the exact
+// reason for a personalized/meta ranking split survives in the narrow list rows.
+function compactLiability(r: PickRec): { text: string; title: string; buffie: boolean } | null {
+  const all = pickLiabilities(r);
+  if (!all.length) return null;
+  const buffies = all.filter(isBuffieLiability);
+  const shown = buffies.length ? buffies : all;
+  const priced = shown.filter((reason) => reason.points != null && Math.abs(reason.points) >= 0.00005);
+  const points = priced.reduce((sum, reason) => sum + (reason.points || 0), 0);
+  const amount = priced.length
+    ? adjustmentLabel(points)
+    : shown.some((reason) => reason.points != null)
+      ? shown.every((reason) => reason.source === "unpriced") ? "UNPRICED" : "0.0PP"
+      : null;
+  const name = buffies.length
+    ? `BUFFIE${buffies.length > 1 ? ` ×${buffies.length}` : ""}`
+    : shown.length === 1 ? gapTags([shown[0].label])[0] : "BUILD";
+  return {
+    text: `${name}${amount ? ` ${amount}` : ""}`,
+    title: shown.map(liabilityTitle).join("\n"),
+    buffie: buffies.length > 0,
+  };
+}
+
+function scoreTrace(r: PickRec): string | undefined {
+  if (r.base_score == null) return undefined;
+  const parts = [`meta baseline ${pct(r.base_score)}`];
+  if ((r.readiness || 0) > 0) parts.push(`your build −${((r.readiness || 0) * 100).toFixed(1)}pp`);
+  if (Math.abs(r.item_edge || 0) >= 0.00005)
+    parts.push(`owned items ${(r.item_edge || 0) < 0 ? "−" : "+"}${Math.abs((r.item_edge || 0) * 100).toFixed(1)}pp`);
+  if (Math.abs(r.history_edge || 0) >= 0.00005)
+    parts.push(`your record ${(r.history_edge || 0) < 0 ? "−" : "+"}${Math.abs((r.history_edge || 0) * 100).toFixed(1)}pp`);
+  return parts.join(" · ");
+}
+
+function ReadinessChips({ r }: { r: PickRec }) {
+  const liabilities = pickLiabilities(r);
+  if (!liabilities.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1 pt-1.5" aria-label="Adjustments for your brawler build">
+      <span className="label mr-0.5">YOUR COPY</span>
+      {liabilities.map((reason) => {
+        const amount = adjustmentLabel(reason.points, reason.source);
+        const buffie = isBuffieLiability(reason);
+        return (
+          <span key={liabilityKey(reason.label)}
+            className={`mono inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 border uppercase tracking-[0.06em] ${reason.source === "unpriced" ? "border-dashed" : ""}`}
+            style={{ borderColor: buffie ? "#e8c34a88" : "#e8843a66", color: buffie ? "var(--gold)" : "#e8a24a" }}
+            title={liabilityTitle(reason)}>
+            <span>⊘ {reason.label}</span>
+            {amount && <span className="tabular-nums opacity-75">{amount}</span>}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 // eased number that animates toward `target` — a readout "locking in"
@@ -1562,7 +1660,7 @@ function TheCall({ kind, r, b, accent, onPlace }: {
   // fallback, and stays visible below either way as the raw read on the brawler.
   const swing = isBan && br.ban_value != null ? br.ban_value : null;
   const headline = swing != null ? swingLabel(swing) : pct(score);
-  const scoreLabel = swing != null ? "WIN SWING" : isBan ? "THREAT" : "SCORE";
+  const scoreLabel = swing != null ? "WIN SWING" : isBan ? "THREAT" : pr.mastery != null ? "YOUR SCORE" : "SCORE";
   const col = isBan ? "var(--red)" : scoreColor(score);
   const reason = isBan ? banReason(br) : pickReason(pr);
   const cls = b?.cls || pr.cls;
@@ -1583,7 +1681,7 @@ function TheCall({ kind, r, b, accent, onPlace }: {
               <div className="display text-[19px] truncate">{r.name}</div>
               <div className="mono text-[10px] tracking-[0.1em]" style={{ color: CLASS_COLOR[cls] || "#aaa" }}>{(CLASS_SHORT[cls] || cls).toUpperCase()}</div>
             </div>
-            <div className="text-right shrink-0" title={swing != null ? SWING_HINT : undefined}>
+            <div className="text-right shrink-0" title={swing != null ? SWING_HINT : !isBan ? scoreTrace(pr) : undefined}>
               <div className="mono font-bold text-[30px] leading-none tabular-nums" style={{ color: col }}>{headline}</div>
               <div className="mono text-[9px] tracking-[0.12em] text-[var(--dim)] mt-1">{scoreLabel}</div>
             </div>
@@ -1611,14 +1709,7 @@ function TheCall({ kind, r, b, accent, onPlace }: {
               title="your recent ranked games with this brawler">YOU · {Math.round(pr.personal_games)}G</span>
           )}
         </div>
-        {!isBan && pr.gaps && pr.gaps.length > 0 && (
-          <div className="flex flex-wrap gap-1 pt-1.5">
-            {pr.gaps.map((g) => (
-              <span key={g} className="mono text-[9px] px-1.5 py-0.5 border uppercase tracking-[0.06em]"
-                style={{ borderColor: "#e8843a66", color: "#e8a24a" }} title="missing from your loadout">{g}</span>
-            ))}
-          </div>
-        )}
+        {!isBan && <ReadinessChips r={pr} />}
       </div>
     </button>
   );
@@ -1626,7 +1717,8 @@ function TheCall({ kind, r, b, accent, onPlace }: {
 
 function RankedPick({ r, i, b, onClick }: { r: PickRec; i: number; b?: Brawler; onClick: () => void }) {
   const score = r.score;
-  const sig = pickSignals(r).sort((a, b2) => Math.abs(b2.v - 0.5) - Math.abs(a.v - 0.5)).slice(0, 3);
+  const liability = compactLiability(r);
+  const sig = pickSignals(r).sort((a, b2) => Math.abs(b2.v - 0.5) - Math.abs(a.v - 0.5)).slice(0, liability ? 2 : 3);
   return (
     <button onClick={onClick} className="card-rec flex items-center gap-2.5 w-full text-left px-3 py-2 border-t border-[var(--line)]"
       style={cssVars({ "--glow": "var(--blue)" })}>
@@ -1637,7 +1729,15 @@ function RankedPick({ r, i, b, onClick }: { r: PickRec; i: number; b?: Brawler; 
           <span className="font-semibold text-[13px] truncate">{r.name}</span>
           <span className="mono text-[9px] tracking-[0.08em] shrink-0" style={{ color: CLASS_COLOR[r.cls] || "#aaa" }}>{CLASS_SHORT[r.cls] || r.cls}</span>
         </div>
-        <SigLine sig={sig} />
+        <div className="flex items-center gap-1.5 min-w-0">
+          <SigLine sig={sig} />
+          {liability && (
+            <span className="mono text-[9px] tracking-[0.04em] truncate"
+              style={{ color: liability.buffie ? "var(--gold)" : "#e8a24a" }} title={liability.title}>
+              ⊘ {liability.text}
+            </span>
+          )}
+        </div>
       </div>
       <span className="mono font-bold text-[16px] tabular-nums shrink-0" style={{ color: scoreColor(score) }}>{pct(score)}</span>
     </button>
@@ -1692,8 +1792,8 @@ function PickColumns({ general, generalReady, personal, personalError, name, byI
     <div className="grid grid-cols-2 anim-fade">
       <div className="min-w-0 border-r border-[var(--line)]">
         <div className="px-2.5 pt-2 label cursor-help"
-          title="the strongest picks for anyone, scored from ranked data that is ~97% Power 11 with a full loadout — advise your teammates from this side">◆ META</div>
-        <div className="px-2.5 pb-1 mono text-[8px] tracking-[0.08em] text-[var(--dim)]">ANYONE · P11 BASELINE</div>
+          title="the strongest picks for anyone from aggregate ranked results — advise your teammates from this side; your column applies account-specific build deductions separately">◆ META</div>
+        <div className="px-2.5 pb-1 mono text-[8px] tracking-[0.08em] text-[var(--dim)]">ANYONE · META BASELINE</div>
         {generalReady
           ? general.slice(0, COL_PICKS).map((r, i) => (
               <MiniPick key={r.brawler_id} r={r} b={byId.get(r.brawler_id)} top={i === 0}
@@ -1703,10 +1803,10 @@ function PickColumns({ general, generalReady, personal, personalError, name, byI
       </div>
       <div className="min-w-0">
         <div className="px-2.5 pt-2 label truncate cursor-help" style={{ color: "var(--gold)" }}
-          title="only brawlers you own that clear this bracket's power floor — a different list from META, not a re-ranking of it. The % assumes a Power 11 brawler on a full loadout, so it does not yet dock for power level or a missing hypercharge.">
+          title="only brawlers you own that clear this bracket's power floor — a different list from META, scored for your power, build, released Buffy ownership, and personal record. Warning chips show what lowered your copy.">
           ◈ {(name || "YOU").toUpperCase()}
         </div>
-        <div className="px-2.5 pb-1 mono text-[8px] tracking-[0.08em] text-[var(--dim)]">YOUR ROSTER · P11 BASELINE</div>
+        <div className="px-2.5 pb-1 mono text-[8px] tracking-[0.08em] text-[var(--dim)]">YOUR ROSTER · BUILD-ADJUSTED</div>
         {personalError ? (
           <div className="mono text-[10px] px-2.5 py-3 leading-snug" style={{ color: "var(--red)" }}>⚠ {personalError}</div>
         ) : personal == null ? (
@@ -1731,16 +1831,13 @@ function MiniPick({ r, b, top, accent, enterHint, onClick }: {
 }) {
   const sig = pickSignals(r).sort((a, b2) => Math.abs(b2.v - 0.5) - Math.abs(a.v - 0.5))[0];
   const detail = pickSignals(r).map((s) => `${s.k} ${two(s.v)}`).join(" · ");
-  const gaps = gapTags(r.gaps);
-  // The score now prices power/loadout deficits (readiness), so the % already reflects these gaps
-  // (hypercharge excepted — no estimator exists). This compact row doesn't render the reason chips,
-  // so the note still names what the player's copy is missing.
-  const gapNote = gaps.length > 0 ? `\n⊘ ${r.gaps.join(" · ")} — missing from your copy` : "";
+  const liability = compactLiability(r);
+  const liabilityNote = liability ? `\n⊘ ${liability.title.replaceAll("\n", " · ")}` : "";
   return (
     <button onClick={onClick}
       className="card-rec flex items-center gap-2 w-full text-left px-2 py-1.5 border-t border-[var(--line)]"
       style={cssVars({ "--glow": accent })}
-      title={`${r.name} · ${pct(r.score)} — ${pickReason(r)}\n${detail}${gapNote}`}>
+      title={`${r.name} · ${pct(r.score)} — ${pickReason(r)}\n${detail}${liabilityNote}`}>
       <Avatar b={b} size={top ? 40 : 30} />
       <div className="flex-1 min-w-0">
         <div className={`font-semibold truncate ${top ? "text-[13px]" : "text-[12px]"}`}>{r.name}</div>
@@ -1750,9 +1847,10 @@ function MiniPick({ r, b, top, accent, enterHint, onClick }: {
               {sig.k} <span style={{ color: sig.v >= 0.5 ? "var(--green)" : "var(--muted)" }}>{two(sig.v)}</span>
             </span>
           )}
-          {gaps.length > 0 && (
-            <span className="mono text-[9px] tracking-[0.06em] truncate" style={{ color: "#e8a24a" }}>
-              ⊘ {gaps.join(" ")}
+          {liability && (
+            <span className="mono text-[9px] tracking-[0.06em] truncate"
+              style={{ color: liability.buffie ? "var(--gold)" : "#e8a24a" }} title={liability.title}>
+              ⊘ {liability.text}
             </span>
           )}
         </div>
@@ -1802,8 +1900,8 @@ function RowSkeleton() {
   );
 }
 
-// Skinny horizontal strip of the map's strongest brawlers at a full loadout — the pure meta,
-// stable across the draft. Icons only; a constant "who's generally strong here" reference.
+// Skinny horizontal strip of the map's strongest brawlers from aggregate ranked results — the
+// pure meta, stable across the draft. Personal build deductions belong to the recommendation list.
 function TopMetaStrip({ picks, byId, used, onPick, disabled, myTurn, fieldableSet, boostedSet, ownedSet, powerFloor, bracket }: {
   picks: TopPick[]; byId: Map<number, Brawler>; used: Set<number>;
   onPick: (id: number) => void; disabled: boolean;
@@ -1811,8 +1909,9 @@ function TopMetaStrip({ picks, byId, used, onPick, disabled, myTurn, fieldableSe
   powerFloor?: number; bracket?: string | null;
 }) {
   const blurb =
-    "The strongest picks right now if you owned every brawler at a full loadout (all gadgets, " +
-    "gears & star powers). Updates as the draft fills in, but ignores your roster, the pure meta.";
+    "The strongest picks from aggregate ranked results. Updates as the draft fills in, but " +
+    "ignores your roster; your recommendation list separately applies conservative deductions " +
+    "for power, build gaps & missing released Buffies.";
   // On your turn a top-meta pick you can't field is missing from your personalized rail with no
   // reason — the exact gap that made a free brawler you owned at low power look un-recommended.
   // Mark it here (dimmed + a badge) so the two rails reconcile: "best on this map, but you can't
@@ -1826,7 +1925,7 @@ function TopMetaStrip({ picks, byId, used, onPick, disabled, myTurn, fieldableSe
     <div className="panel">
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)] cursor-help" title={blurb}>
         <span className="label" style={{ color: "var(--gold)" }}>◆ TOP META</span>
-        <span className="label">FULL LOADOUT</span>
+        <span className="label">META BASELINE</span>
       </div>
       <div className="p-2 flex flex-wrap gap-1.5">
         {picks.length === 0
@@ -1838,7 +1937,7 @@ function TopMetaStrip({ picks, byId, used, onPick, disabled, myTurn, fieldableSe
               return (
                 <button key={p.brawler_id} onClick={() => onPick(p.brawler_id)} disabled={isUsed || disabled}
                   className="group relative disabled:cursor-not-allowed anim-snap"
-                  title={`#${i + 1}  ${p.name}\n${pct(p.score)} pick score · ${pct(p.map_winrate)} map win rate\nassumes a full loadout${cant ? `\n⚠ you can't field this: ${cant.reason}` : ""}`}>
+                  title={`#${i + 1}  ${p.name}\n${pct(p.score)} pick score · ${pct(p.map_winrate)} map win rate\naggregate meta baseline; your recommendation list applies personal build adjustments${cant ? `\n⚠ you can't field this: ${cant.reason}` : ""}`}>
                   <span className="thumb block" style={cssVars({ "--tc": (b && RARITY_COLOR[b.rarity]) || "#26303f" })}>
                     <Avatar b={b} size={44} dim={isUsed || !!cant} />
                   </span>

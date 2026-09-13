@@ -583,9 +583,10 @@ def recommend_purchases(owned: Dict[int, OwnedState], stats: DraftStats,
         elif not st.has_hypercharge and _hypercharge_eligible(economy, b.name):
             recs.append(_hypercharge_rec(ctx, b, s))
 
-        # Buffies are intentionally not advised: the roster reports which buffies you *own* but not
-        # how many exist per brawler, so a "slot open" can't be told from "no buffie released" (a
-        # brawler like R-T has none). See engine/mastery.py for the same reasoning.
+        # Buffies are intentionally not advised here. The curated availability policy now lets
+        # mastery/readiness distinguish "owns none" from "none released", but a purchase row also
+        # needs a reviewed cost/package model and an impact prior in this advisor's relative-lift
+        # units. Do not reuse the scorer's win-rate-point readiness prior as though the units match.
 
     recs.sort(key=_sort_key)
     return [r.as_dict() for r in _select(recs, top, min_per_kind)]

@@ -4,6 +4,24 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-09-13
+
+- **Personal picks now account for the Buffies you actually own.** The roster keeps Gadget, Star,
+  and Hyper Buffy ownership separate from availability, so Gus with none is scored below a fully
+  Buffied Gus while R-T and other brawlers with no released Buffies receive no false penalty. Each
+  missing gameplay Buffy is shown as an estimated 1.0-point deduction; old/partial roster data
+  remains neutral, and free Ranked brawlers still count as fully built.
+
+## 2026-09-12
+
+- **Loadout advice now has a live data path.** The home crawler can collect ownership profiles,
+  build the gated item win-rate artifact, and publish it alongside the match data; Render loads it
+  on its normal refresh loop and falls back to the heuristic wherever coverage is still thin.
+- **Gadget descriptions and effect parsing are current.** The existing reference snapshot now
+  includes the August reworks (including El Primo's Suplex Supplement and Asteroid Belt), and
+  loadout classification no longer mistakes words like "removes" or projectile denial for movement
+  or raw damage.
+
 ## 2026-09-09
 
 - **The post-draft plan now tells each brawler where to start and when to swap.** Finished teams

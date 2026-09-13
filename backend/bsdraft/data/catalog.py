@@ -8,14 +8,15 @@ about is invisible to the tool, and a brand-new brawler silently encodes to embe
 This module is the **structured** half of the new-content watch, complementing the prose half in
 :mod:`bsdraft.collect.patchnotes`:
 
-  * here — ids and names straight from the keyless catalog API: new/removed/renamed **brawlers**,
-    their **star powers** and **gadgets**, plus **class/rarity** changes (which move composition
-    reasoning). Exact, machine-checkable, no parsing of English.
+  * here — ids, names, and descriptions straight from the keyless catalog API: new/removed/renamed
+    **brawlers**, their **star powers** and **gadgets**, plus **class/rarity** changes (which move
+    composition reasoning). Exact, machine-checkable, no parsing of English.
   * patchnotes — everything the catalog does NOT expose: **gears, hypercharges, buffies** and the
     actual balance numbers. Verified: ``/v1/{gadgets,starpowers,gears}`` are 404 and brawler
     records carry no gears/hypercharge/buffies field, so the release notes are the only source
-    for those. (Buffies do show up per-player on the roster as owned/not-owned flags, but with no
-    way to know how many exist per brawler they aren't scored — see ``engine/mastery.py``.)
+    for those. (Buffies do show up per-player on the roster as owned/not-owned flags; the curated
+    cumulative availability policy in ``data/reference/buffies.json`` supplies the missing
+    existence half used by ``engine/mastery.py``.)
 
 Source hosts: ``api.brawlify.com`` began bot-blocking automated requests (HTTP 403 "Security
 Check") — ``api.brawlapi.com`` serves the identical payload and is tried first, with the
@@ -55,11 +56,13 @@ ACCESSORY_FIELDS = (("starPowers", "star power"), ("gadgets", "gadget"))
 @dataclass
 class AccessoryChange:
     kind: str            # "star power" | "gadget"
-    change: str          # "added" | "removed" | "renamed"
+    change: str          # "added" | "removed" | "renamed" | "description"
     accessory_id: int
     brawler: str
     name: str
     old_name: str = ""   # only for "renamed"
+    old_description: str = ""   # only for "description"
+    new_description: str = ""   # only for "description"
 
 
 @dataclass
@@ -148,6 +151,8 @@ class CatalogDiff:
         for c in self.accessory_changes:
             if c.change == "renamed":
                 lines.append(f"  {c.kind} renamed: {c.brawler} — {c.old_name!r} -> {c.name!r}")
+            elif c.change == "description":
+                lines.append(f"  {c.kind} description updated: {c.brawler} — {c.name}")
             else:
                 lines.append(f"  {c.kind} {c.change}: {c.brawler} — {c.name}")
         if self.destructive:
@@ -219,6 +224,51 @@ def dedupe_accessories(payload: dict, label: str = "brawlers") -> List[str]:
     return notes
 
 
+def refresh_accessory_details(current_payload: dict, live_payload: dict) -> List[str]:
+    """Update known brawlers' accessory details from a validated live payload, in place.
+
+    This deliberately preserves the current brawler list and accessory membership: a catalog
+    refresh that adds brawlers or removes accessories can change model vocabulary or user-facing
+    choices and needs a separate rollout. Existing accessory ids are stable, so their name/path,
+    description, image, release flag, and catalog version can be refreshed safely. Returns one
+    human-readable note per changed accessory.
+    """
+    live_brawlers = {
+        b.get("id"): b for b in (live_payload.get("list") or [])
+        if isinstance(b, dict) and isinstance(b.get("id"), int)
+    }
+    notes: List[str] = []
+    detail_fields = ("name", "path", "version", "description", "descriptionHtml",
+                     "imageUrl", "released")
+    for current_brawler in current_payload.get("list") or []:
+        if not isinstance(current_brawler, dict):
+            continue
+        live_brawler = live_brawlers.get(current_brawler.get("id"))
+        if live_brawler is None:
+            continue
+        bname = current_brawler.get("name", str(current_brawler.get("id")))
+        for fieldname, kind in ACCESSORY_FIELDS:
+            live_items = {
+                a.get("id"): a for a in (live_brawler.get(fieldname) or [])
+                if isinstance(a, dict) and isinstance(a.get("id"), int)
+            }
+            for current_item in current_brawler.get(fieldname) or []:
+                if not isinstance(current_item, dict):
+                    continue
+                live_item = live_items.get(current_item.get("id"))
+                if live_item is None:
+                    continue
+                changed = []
+                for key in detail_fields:
+                    if key in live_item and current_item.get(key) != live_item[key]:
+                        current_item[key] = live_item[key]
+                        changed.append(key)
+                if changed:
+                    notes.append(f"updated {kind} {live_item.get('name', current_item.get('id'))!r} "
+                                 f"(#{current_item.get('id')}) on {bname}: {', '.join(changed)}")
+    return notes
+
+
 def fetch_catalog(path: str, hosts: Iterable[str] = CATALOG_HOSTS,
                   timeout: float = 30.0, url: Optional[str] = None) -> Tuple[dict, str]:
     """GET ``/v1/<path>`` from the first host that returns a valid catalog, or exactly ``url``
@@ -269,15 +319,16 @@ def _rarity_of(b: dict) -> str:
     return (b.get("rarity") or {}).get("name") or ""
 
 
-def _accessories(brawlers: Iterable[dict]) -> Dict[int, Tuple[str, str, str]]:
-    """accessory id -> (kind, brawler name, accessory name) across every brawler."""
-    out: Dict[int, Tuple[str, str, str]] = {}
+def _accessories(brawlers: Iterable[dict]) -> Dict[int, Tuple[str, str, str, str]]:
+    """accessory id -> (kind, brawler, name, description) across every brawler."""
+    out: Dict[int, Tuple[str, str, str, str]] = {}
     for b in brawlers:
         bname = b.get("name", str(b.get("id")))
         for fieldname, kind in ACCESSORY_FIELDS:
             for a in (b.get(fieldname) or []):
                 if isinstance(a, dict) and isinstance(a.get("id"), int):
-                    out[a["id"]] = (kind, bname, a.get("name", ""))
+                    out[a["id"]] = (kind, bname, a.get("name", ""),
+                                    a.get("description", "") or "")
     return out
 
 
@@ -313,15 +364,19 @@ def diff_catalogs(before: List[dict], after: List[dict]) -> CatalogDiff:
     oa, na = _accessories(before), _accessories(after)
     acc: List[AccessoryChange] = []
     for aid in sorted(set(na) - set(oa)):
-        kind, bname, aname = na[aid]
+        kind, bname, aname, _description = na[aid]
         acc.append(AccessoryChange(kind, "added", aid, bname, aname))
     for aid in sorted(set(oa) - set(na)):
-        kind, bname, aname = oa[aid]
+        kind, bname, aname, _description = oa[aid]
         acc.append(AccessoryChange(kind, "removed", aid, bname, aname))
     for aid in sorted(set(oa) & set(na)):
-        kind, bname, aname = na[aid]
+        kind, bname, aname, description = na[aid]
         if oa[aid][2] != aname:
             acc.append(AccessoryChange(kind, "renamed", aid, bname, aname, old_name=oa[aid][2]))
+        if oa[aid][3] != description:
+            acc.append(AccessoryChange(kind, "description", aid, bname, aname,
+                                       old_description=oa[aid][3],
+                                       new_description=description))
 
     return CatalogDiff(n_before=len(ob), n_after=len(nb),
                        brawler_changes=changes, accessory_changes=acc)
@@ -456,7 +511,12 @@ def render_pr(diff: CatalogDiff, source_url: str,
         lines += [f"## 🔧 Star power / gadget changes ({len(diff.accessory_changes)})", "",
                   "| Change | Kind | Brawler | Name |", "|---|---|---|---|"]
         for c in diff.accessory_changes:
-            nm = f"`{c.old_name}` → `{c.name}`" if c.change == "renamed" else c.name
+            if c.change == "renamed":
+                nm = f"`{c.old_name}` → `{c.name}`"
+            elif c.change == "description":
+                nm = f"{c.name} (description updated)"
+            else:
+                nm = c.name
             lines.append(f"| {c.change} | {c.kind} | {c.brawler} | {nm} |")
         lines.append("")
     rest = [c for c in diff.brawler_changes if c.change != "added"]

@@ -11,6 +11,10 @@ that retired that claim.
 **Owner:** `backend/bsdraft/data/readiness_build.py` (home-only, numpy) →
 `backend/scripts/export_readiness.py` → `data/reference/readiness.json` (checked in, stdlib-loadable).
 
+**Buffy availability:** `data/reference/buffies.json` (curated from official release notes). The
+live player roster supplies ownership; the reference file supplies whether those three gameplay
+Buffies actually exist for that brawler.
+
 ```bash
 PYTHONPATH=backend python backend/scripts/export_readiness.py
 ```
@@ -165,14 +169,15 @@ same board.
 
 | Adjustment | Cap | Provenance |
 | --- | --- | --- |
-| `readiness` | 0.12 | **measured** (power) + **estimated** (loadout) + **unpriced** (hypercharge) |
+| `readiness` | 0.12 | **measured** (power) + **estimated** (loadout and Buffies) + **unpriced** (hypercharge) |
 | `item_edge` | 0.05 | measured — inert, the table does not exist |
 | `history_edge` | 0.02 | unvalidated product knob |
 
 Two sizing rules hold the labels honest, both pinned by tests:
 
-- **No declared prior outranks a measurement.** The largest loadout prior (a missing star power,
-  0.021) sits below the smallest non-zero measured deficit (Power 10, 0.040).
+- **No declared prior outranks a measurement.** A missing Buffy is 0.010; even the complete
+  three-Buffy package (0.030) and the largest ordinary-loadout prior (a missing star power,
+  0.021) sit below the smallest non-zero measured deficit (Power 10, 0.040).
 - **The unvalidated knob stays well under the measured one.** `HISTORY_CAP` is 0.02 against a
   Power 9 deficit of 0.075. A personal win rate is confounded with when you played, who you queued
   with, and meta drift since; a power level is not.
@@ -184,6 +189,14 @@ Power 9 copy has exactly one. Charging it for an empty second slot would bill th
 twice — once as power, once as a missing gear. `Fielded.gear_slots` charges only for slots the
 power level has actually unlocked.
 
+**Buffy ownership is not Buffy availability.** The player endpoint returns the same all-false
+`buffies` object for a player who owns none and for a brawler whose Buffies do not exist. The scorer
+therefore interprets those booleans only for ids in the cumulative `buffies.json` policy. Missing,
+partial, or old-schema ownership remains unknown and neutral; an explicit `false` on an available
+slot is a 0.010 estimated deficit. A Hyper Buffy is still shown below Power 11, but is not priced
+until the copy can field Hypercharge, so the measured power penalty is not charged twice. The
+newer cosmetic Buffy never enters the policy or scoring.
+
 **The player's overall win rate is a header fact, not a per-pick adjustment.** A difference-in-
 differences that nets a player's global rate out of each brawler's edge looks principled and is
 useless: the term is a per-player constant, so it shifts every candidate identically and cannot
@@ -193,11 +206,18 @@ not call it.
 
 ## What this does not measure
 
+**Buffy effect size.** Availability and account ownership are known, but battle logs do not say
+which Buffy-powered ability was present in a match. The 0.010-per-slot value is therefore a
+declared, equal prior—not a Gus-specific or item-specific win-rate estimate. It is deliberately
+small enough that all three missing Buffies together remain below the measured Power 10 effect.
+The recommendation response exposes each line as `estimated`, and a future ownership-linked
+estimator can replace the prior without changing the wire shape.
+
 **Hypercharge.** Battle logs carry no hypercharge field — an appearance is
 `{tag, brawler_id, brawler_name, power, trophies}` — so no estimator exists on data in hand. It
-ships displayed-and-unpriced. `collect/profiles.py` now records `hc` (and `ht`) per brawler
-because ownership is only observable *live*: a hypercharge contrast can never be reconstructed
-from the match log retroactively, so every un-profiled day is unrecoverable.
+ships displayed-and-unpriced. `collect/profiles.py` now records `hc`, tri-state `bf`, and `ht` per
+brawler because Hypercharge/Buffy ownership is only observable *live*: those contrasts can never
+be reconstructed from the match log retroactively, so every un-profiled day is unrecoverable.
 
 **Per-map or per-mode slices.** The strata key has no map component and the effect is estimated
 globally. Power is a stat multiplier, not a matchup property, so a global constant is the right

@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "artifact_id": "synthetic-world-v1",
+  "game_build": "synthetic-test-build",
+  "effective_at": "2026-09-09T00:00:00Z",
+  "power_level": 11,
+  "mechanics_source": {
+    "uri": "synthetic://mechanics",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "verification_method": "synthetic",
+    "verified_at": "2026-09-09T00:00:00Z"
+  },
+  "maps": [
+    {
+      "map_id": 99000001,
+      "name": "Synthetic Barrier",
+      "mode": "Heist",
+      "revision": "fixture-1",
+      "annotation_method": "synthetic",
+      "verified_at": "2026-09-09T00:00:00Z",
+      "cell_size_world": 1.0,
+      "width": 7,
+      "height": 7,
+      "terrain": [
+        ".......",
+        "...#...",
+        "...#...",
+        "...+...",
+        "...#...",
+        "...#...",
+        "......."
+      ],
+      "objective_cells": [[5, 3]],
+      "ally_spawn_cells": [[1, 3]],
+      "enemy_spawn_cells": [[5, 3]],
+      "source": {
+        "uri": "synthetic://barrier-map",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "width_px": 210,
+        "height_px": 210,
+        "grid_origin_x_px": 0,
+        "grid_origin_y_px": 0,
+        "pixels_per_cell": 30
+      }
+    },
+    {
+      "map_id": 99000002,
+      "name": "Synthetic Narrow Gate",
+      "mode": "Heist",
+      "revision": "fixture-1",
+      "annotation_method": "synthetic",
+      "verified_at": "2026-09-09T00:00:00Z",
+      "cell_size_world": 1.0,
+      "width": 5,
+      "height": 5,
+      "terrain": [
+        ".....",
+        ".....",
+        "##.##",
+        ".....",
+        "....."
+      ],
+      "objective_cells": [[2, 3]],
+      "ally_spawn_cells": [[2, 1]],
+      "enemy_spawn_cells": [[2, 4]],
+      "source": {
+        "uri": "synthetic://narrow-gate-map",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "width_px": 150,
+        "height_px": 150,
+        "grid_origin_x_px": 0,
+        "grid_origin_y_px": 0,
+        "pixels_per_cell": 30
+      }
+    }
+  ],
+  "brawlers": [
+    {
+      "brawler_id": 99000101,
+      "name": "Synthetic Line Shooter",
+      "max_health": 1200,
+      "move_speed_world_per_second": 3.0,
+      "collision_radius_world": 0.2,
+      "attack": {
+        "kind": "direct",
+        "damage": 400,
+        "projectiles": 1,
+        "ammo": 3,
+        "reload_seconds": 1.0,
+        "unload_seconds": 0.2,
+        "range_world": 6.0,
+        "min_range_world": 0.0,
+        "projectile_speed_world_per_second": 12.0,
+        "projectile_radius_world": 0.05,
+        "splash_radius_world": 0.0
+      }
+    },
+    {
+      "brawler_id": 99000102,
+      "name": "Synthetic Thrower",
+      "max_health": 900,
+      "move_speed_world_per_second": 2.5,
+      "collision_radius_world": 0.2,
+      "attack": {
+        "kind": "lobbed",
+        "damage": 300,
+        "projectiles": 1,
+        "ammo": 3,
+        "reload_seconds": 1.2,
+        "unload_seconds": 0.3,
+        "range_world": 5.0,
+        "min_range_world": 0.5,
+        "projectile_speed_world_per_second": 6.0,
+        "projectile_radius_world": 0.1,
+        "splash_radius_world": 0.5
+      }
+    },
+    {
+      "brawler_id": 99000103,
+      "name": "Synthetic Short-Range Tank",
+      "max_health": 1800,
+      "move_speed_world_per_second": 3.5,
+      "collision_radius_world": 0.45,
+      "attack": {
+        "kind": "direct",
+        "damage": 900,
+        "projectiles": 1,
+        "ammo": 3,
+        "reload_seconds": 1.5,
+        "unload_seconds": 0.4,
+        "range_world": 1.5,
+        "min_range_world": 0.0,
+        "projectile_speed_world_per_second": 8.0,
+        "projectile_radius_world": 0.15,
+        "splash_radius_world": 0.0
+      }
+    }
+  ]
+}

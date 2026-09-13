@@ -8,9 +8,18 @@ export type PickRec = {
   brawler_id: number; name: string; cls: string; score: number; map_winrate: number;
   synergy: number | null; counter: number | null; role_fit: number;
   win_prob: number | null; confidence: number;
+  // Aggregate meta baseline plus the signed, account-specific adjustments that produce `score`.
+  // Optional for deploy skew: Pages and the scoring backend do not always roll at the same time.
+  base_score?: number; readiness?: number; readiness_reasons?: ReadinessReason[];
+  item_edge?: number; history_edge?: number;
   mastery: number | null; personal_winrate: number | null; personal_games: number | null;
   owned: boolean; gaps: string[];
   breakdown: Record<string, number>;
+};
+export type ReadinessReason = {
+  label: string;
+  points: number; // signed win-rate points; deficits are negative, 0 means known but unpriced
+  source: "measured" | "estimated" | "unpriced" | string;
 };
 export type BanRec = {
   brawler_id: number; name: string; cls: string; threat: number;
@@ -79,6 +88,11 @@ export type RecommendResponse = {
 };
 
 export type OwnedGear = { id: number; name: string; level: number };
+export type OwnedBuffies = {
+  gadget?: boolean | null;
+  star_power?: boolean | null;
+  hypercharge?: boolean | null;
+};
 export type OwnedBrawler = {
   id: number; mastery: number; gaps: string[];
   // Specific items the player owns on this brawler — populated by /api/roster. Used to restrict
@@ -94,9 +108,15 @@ export type OwnedBrawler = {
   // power-floor gate. These are optional only because an older backend may not return them; that is
   // not license to project them away when POSTing.
   power?: number; has_hypercharge?: boolean;
+  // Buffy ownership is live-roster-only. Null/absent means an older roster host, not "owns none".
+  // Keep the whole object on recommend requests so the public scoring host can distinguish those
+  // cases and only price Buffies that are actually released for this brawler.
+  buffies?: OwnedBuffies | null;
 };
 export type RosterResponse = {
-  loaded: boolean; tag: string; name: string; owned: OwnedBrawler[]; error?: string | null;
+  loaded: boolean; tag: string; name: string; owned: OwnedBrawler[];
+  roster_schema?: number; // v3 adds tri-state Buffy ownership; absent means legacy/unknown
+  error?: string | null;
 };
 
 export type LoadoutItem = {

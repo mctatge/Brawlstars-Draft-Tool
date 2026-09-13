@@ -16,6 +16,10 @@ engine fuses the model with empirical stats built at startup from the same match
 - `collect/` — async client, crawler, match parser, publish.
 - `data/` — reference loaders, encoders, dataset builder, runtime release sync in `data/sync.py`.
 - `models/` — train (`winprob.py`) + serve (`serve.py`).
+- `world/` — strict, patch-pinned mechanics/map schema plus dependency-free geometry and
+  factorized offline evaluation. It is synthetic-only and intentionally disconnected from pick
+  scoring until verified production data passes the gate in
+  [`spatial-world-model.md`](spatial-world-model.md).
 - `engine/` — the draft brain. `engine/state.py`'s `DraftState` is the object threaded
   through nearly everything. Core: `engine.py` (the `DraftEngine` facade) / `scoring.py`
   (pick scoring) / `bans.py` (ban valuation) / `stats.py` / `mastery.py` /
@@ -51,14 +55,15 @@ engine fuses the model with empirical stats built at startup from the same match
    (needs `pydantic-settings`) is deliberately *not* imported by the reference layer. Keep
    third-party imports out of these two modules.
 
-4. **Fused, renormalized scoring.** `engine/scoring.py` scores a pick as a weighted average
-   over only the **active** signals (synergy needs allies, counters need a revealed enemy,
-   mastery/personal need a roster), renormalized by the active weights. `DEFAULT_WEIGHTS`
-   were tuned via the held-out ablation (see the comment there and
-   [model-evaluation.md](model-evaluation.md)) — context-dependent per-map weighting was
-   tested and found no better, so weights are global. The model signal scores the draft
-   board as it stands: the net is trained on masked comps, so partial teams are first-class
-   inputs (`supports_partial`), with a legacy top-meta completion fallback for old artifacts.
+4. **Objective blend first, account adjustments second.** `engine/scoring.py` builds a
+   renormalized weighted average over only the active objective signals (synergy needs allies;
+   counters need a revealed enemy), using the held-out `DEFAULT_WEIGHTS`. It then applies signed,
+   capped account adjustments in win-rate points: fielded-copy readiness (power, loadout, and
+   released Buffy ownership), measured item quality when available, and a small personal-history
+   edge. Mastery remains display-only. Keeping the stages separate makes the meta and personal
+   scores comparable and keeps every estimate visible with its provenance. The model signal reads
+   the board as it stands: masked comps are first-class inputs (`supports_partial`), with a legacy
+   top-meta completion fallback for old artifacts. See [readiness.md](readiness.md).
 
 ## Bans are valued, not ranked by threat
 
@@ -96,16 +101,23 @@ priors chosen for behavior on live maps, not tuned parameters — treat them as 
 
 ## The two recommend endpoints are intentionally distinct
 
-`/api/recommend` personalizes to the player's roster + history (mastery, personal win-rate),
+`/api/recommend` personalizes to the player's roster + history (fielded readiness, personal win-rate),
 while `/api/top_picks` is the pure population meta — every brawler at a full loadout,
 **no roster filtering**. Mastery is loadout-forward — it ranks *investment* (which star powers /
-gadgets / gears you own, plus comfort), not power level. Power is enforced separately as
+gadgets / gears / released Buffies you own, plus comfort), not power level, and is display-only.
+Power is enforced separately as
 a hard **fieldability gate**: Ranked doesn't normalize brawlers to a fixed power, and each bracket
 blocks selecting a brawler below a floor (Power 9 through Diamond, Power 11 from Mythic up), so
 `_roster_for` drops owned brawlers under `tiers.min_power_for_bracket(bracket)` before they're ever
 scored — an un-maxed brawler you can't field in Legendary must not be recommended. The season's
 free "boosted" brawlers arrive at Power 11 and are folded in *after* the gate, so an owned-but-
 under-levelled free brawler (Ranked hands out a maxed copy) is still recommendable.
+
+Buffy ownership crosses the home-roster/public-score split in roster schema 3 as an optional
+snake-case object. `None` means old/unknown and is neutral; explicit false flags are interpreted
+only when the candidate id appears in `data/reference/buffies.json`. The policy is cumulative and
+fails closed, so a stale list under-prices a newly released Buffy instead of inventing missing
+items for every ineligible brawler.
 
 The free set (`main._free_brawler_ids`) unions two sources, because a wrong *omission* silently
 deletes the map's best pick while a wrong *inclusion* only over-offers, and both sources are

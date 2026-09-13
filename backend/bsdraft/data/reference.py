@@ -27,6 +27,11 @@ from bsdraft.constants import (
 CLASS_OVERRIDES_PATH = Path(__file__).resolve().parent / "class_overrides.json"
 RANKED_BOOSTED_PATH = REFERENCE_DIR / "ranked_boosted.json"
 ECONOMY_PATH = REFERENCE_DIR / "economy.json"
+BUFFIES_PATH = REFERENCE_DIR / "buffies.json"
+
+# Functional Buffy categories exposed by the live player roster. The newer cosmetic Buffy is not
+# part of that object and has no gameplay effect, so it deliberately does not belong here.
+BUFFIE_SLOTS = ("gadget", "star_power", "hypercharge")
 
 # How long a rotation / grant with no explicit ``valid_until`` may keep serving after its start.
 # A Ranked season runs ~4-5 weeks, so this never truncates a live one; it exists so an
@@ -354,6 +359,48 @@ def load_economy() -> dict:
     except (json.JSONDecodeError, OSError):
         return {}
     return doc if isinstance(doc, dict) else {}
+
+
+@lru_cache(maxsize=1)
+def load_buffie_brawlers() -> frozenset:
+    """Ids of brawlers with the three functional Buffy slots.
+
+    The player endpoint exposes only ownership booleans and returns the same all-false object for
+    a player who owns none and a brawler that has no Buffies at all. Availability therefore comes
+    from the cumulative, hand-maintained ``buffies.json`` policy. Each ``name -> id`` pair must
+    agree with the catalog before it is served: a typo or stale entry under-covers rather than
+    charging a player for an item that does not exist. A missing/malformed document fails closed
+    to an empty set.
+    """
+    if not BUFFIES_PATH.exists():
+        return frozenset()
+    try:
+        doc = _load_json(BUFFIES_PATH)
+    except (json.JSONDecodeError, OSError):
+        return frozenset()
+    if (not isinstance(doc, dict) or doc.get("schema") != 1
+            or tuple(doc.get("slots") or ()) != BUFFIE_SLOTS):
+        return frozenset()
+    raw = doc.get("brawlers")
+    if not isinstance(raw, dict):
+        return frozenset()
+    out = set()
+    for name, raw_id in raw.items():
+        if not isinstance(name, str):
+            continue
+        b = brawler_by_name(name)
+        try:
+            bid = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if b is not None and b.released and b.id == bid:
+            out.add(bid)
+    return frozenset(out)
+
+
+def has_buffies(brawler_id: int) -> bool:
+    """Whether the curated policy confirms functional Buffies for ``brawler_id``."""
+    return brawler_id in load_buffie_brawlers()
 
 
 def summary() -> str:

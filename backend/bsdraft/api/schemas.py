@@ -12,6 +12,21 @@ class OwnedGear(BaseModel):
     level: int = 0
 
 
+class OwnedBuffies(BaseModel):
+    """Functional Buffy ownership on the cross-host roster wire.
+
+    Optional members make a partially rolled-out upstream shape fail neutral per slot; a current
+    roster response populates all three with booleans. Unknown whole-object state remains the
+    enclosing ``OwnedBrawler.buffies = None``. Extra keys (including the cosmetic Buffy) are
+    rejected so they cannot silently become gameplay scoring inputs.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    gadget: Optional[bool] = None
+    star_power: Optional[bool] = None
+    hypercharge: Optional[bool] = None
+
+
 class OwnedBrawler(BaseModel):
     id: int
     mastery: float
@@ -19,8 +34,9 @@ class OwnedBrawler(BaseModel):
     # The specific items this player owns on the brawler, so the client can restrict loadout
     # suggestions on the user's own pick to what they can actually equip. Populated by /api/roster
     # and read by /api/purchases. They are *also* on the wire for /api/recommend — the client POSTs
-    # whole roster entries there, not a projection (see ``power``) — but that path ignores them:
-    # ``_roster_for`` in main.py reads only id/mastery/gaps/power. Transmitted-but-unread, not absent.
+    # whole roster entries there, not a projection (see ``power``) — but that path ignores the
+    # specific item ids: ``_roster_for`` reads the gear count plus progression fields, including
+    # Buffy ownership below. Transmitted-but-unread as ids, not absent.
     owned_star_powers: List[int] = []
     owned_gadgets: List[int] = []
     owned_gears: List[OwnedGear] = []
@@ -38,6 +54,11 @@ class OwnedBrawler(BaseModel):
     # what the current client sends.
     power: int = 0
     has_hypercharge: bool = False
+    # Functional Buffy ownership, normalized from the official API's camel-case keys. ``None``
+    # means the roster host/client predates this field (unknown, never a penalty); an explicit
+    # all-false object means owns none. Availability is intentionally not inferred here because
+    # non-Buffie brawlers expose the same all-false upstream shape.
+    buffies: Optional[OwnedBuffies] = None
 
 
 class RecommendRequest(BaseModel):
@@ -305,12 +326,14 @@ class ReferenceResponse(BaseModel):
     boosted: List[int] = []      # ids of this season's free/"boosted" Ranked brawlers
 
 
-ROSTER_SCHEMA = 2
+ROSTER_SCHEMA = 3
 """Monotonic version of the per-brawler roster shape.
 
 1 — the original: id / mastery / gaps / owned items / power / has_hypercharge.
 2 — the same fields, but ``mastery`` is display-only and scoring reads power + gaps + gear count
     to price readiness (see :mod:`bsdraft.engine.readiness`).
+3 — adds optional ``buffies`` ownership in canonical snake case. ``None`` is old/unknown; an
+    explicit object is interpreted only against the scoring host's curated availability policy.
 
 It exists because /api/roster and /api/recommend are served by *different hosts* that deploy
 independently — the roster comes from the keyed tunnel on the home machine, recommend from Render.

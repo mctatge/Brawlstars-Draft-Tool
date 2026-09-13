@@ -37,6 +37,8 @@ PYTHONPATH=backend python backend/scripts/train.py                    # torch tr
 PYTHONPATH=backend python backend/scripts/export_model.py             # winprob.pt → winprob.npz (commit this)
 PYTHONPATH=backend python backend/scripts/export_stats.py             # precomputed stats artifact (published next to matches.jsonl.gz)
 PYTHONPATH=backend python backend/scripts/export_rank_index.py        # precomputed tag→tier rank index (rank_index.npz; the cloud LOADS it — ~66 MB peak vs ~200 MB+ building in RAM)
+PYTHONPATH=backend python -m bsdraft.collect.profiles --limit 500 --recent-days 35  # collect a bounded ownership batch
+PYTHONPATH=backend python backend/scripts/export_itemstats.py                     # build itemstats.json.gz locally
 ```
 
 Other scripts under `backend/scripts/`:
@@ -44,9 +46,26 @@ Other scripts under `backend/scripts/`:
 - `smoke_test.py` — verify the API key works + inspect real response shapes.
 - `ablate_components.py` / `ablate_context.py` — held-out ablations → `docs/ablation*.json`
   (methodology + results in [model-evaluation.md](model-evaluation.md)).
-- `refresh_reference.py` — re-pull the Brawlify reference JSONs. **Careful:** refreshing
+- `refresh_reference.py` — re-pull the Brawlify reference JSONs. Use `--accessories-only` to
+  refresh existing gadget/star-power descriptions and names without adding brawlers or changing
+  map vocabulary. **Careful:** a full refresh
   `maps.json` without a retrain silently re-maps trained map embedding rows; brawlers are
   safe (id-sorted, append-only).
+
+### Spatial world-model bootstrap
+
+The first world-model build is dark/offline-only and has no production artifact. To capture a source
+PNG's exact checksum, dimensions, and declared pixel-to-cell transform as an authoring skeleton:
+
+```bash
+PYTHONPATH=backend python backend/scripts/bootstrap_map_geometry.py /path/to/map.png \
+  --map-id MAP_ID --name "MAP NAME" --mode "MODE" --revision SOURCE_REVISION \
+  --source-uri SOURCE_URL --pixels-per-cell PIXELS
+```
+
+The command prints JSON and never writes or downloads anything. Every terrain cell is `?`
+(fail-closed) until collision semantics, objectives, and spawns are verified. See
+[`spatial-world-model.md`](spatial-world-model.md).
 
 ## Tests
 
@@ -55,6 +74,7 @@ Lightweight by design; each test file also runs standalone via `__main__`.
 ```bash
 PYTHONPATH=backend python -m pytest backend/tests/
 PYTHONPATH=backend python backend/tests/test_personal.py
+PYTHONPATH=backend python -m pytest backend/tests/test_world_model.py -q
 ```
 
 `pytest` / `ruff` / `mypy` are optional dev tools (not pinned in requirements).

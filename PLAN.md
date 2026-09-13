@@ -95,6 +95,11 @@ Each is an **explicit, tunable parameter** in the engine — exposed in the UI a
 - [x] **Phase 3 — Draft engine:** ✓ stats layer; ✓ fused pick scoring (model + map win-rate + synergy + counter + role-fit, transparent breakdown + confidence); ✓ ban recommendation; ✓ composition meter; ✓ **seat-aware 1-2-2-1 snake minimax search** (top-K pruned + memoized; captures first/last-pick value; ~1.8s worst case, <50ms mid-draft — *retired 2026-08-12 in favor of the partial-draft-native model*); ✓ **composition warnings** (no-frontline / no-range / double-tank / anti-tank / mode-specific); ✓ **mastery layer** (personalize to owned roster; weights power + comfort + build **incl. buffies**; restricts picks to owned; flags gaps like "missing buffie"). All wired into API + UI and verified. **Phase 3 complete.**
 - [x] **Phase 4 — API + frontend:** ✓ FastAPI (reference + recommend; engine loaded at startup); ✓ Next.js 16 draft board — map select, ban/pick phases, click-to-place, live recommendations with map/synergy/counter/role/model breakdown + confidence, composition meter, snake-turn tracking, responsive dark UI. Verified rendering + interaction via preview.
 - [ ] **Phase 5 — Polish:** methodology write-up, model card, eval charts, demo GIF, deploy, license.
+- [ ] **Phase 6 — Spatial world model:** ✓ dark, offline foundation (patch-pinned mechanics/map
+  schema, semantic collision grid, line of sight, body-clearance pathing, point-target reach, static
+  TTK/team reads, strict provenance and resource gates); next is independently verified mechanics
+  and map annotation, followed by temporal/cold-start evaluation before any scoring weight. See
+  [`docs/spatial-world-model.md`](docs/spatial-world-model.md).
 
 ## 9. Reference-data notes (from the fetched Brawlify data)
 
@@ -107,6 +112,7 @@ Each is an **explicit, tunable parameter** in the engine — exposed in the UI a
 - ~~**"buffies"**~~ → resolved: a real per-brawler API field, handled in the mastery layer (§3.3).
 - **Python version** — 3.9.6 present; recommend 3.11+ (code kept 3.9-compatible where cheap).
 - **Deployment target** for Phase 5 (Vercel + a Python host? single Docker? local-only?).
-- **Map geometry in the learned model** (walls/bushes/lanes) remains out of scope: match rows have
-  no positional data. The post-draft game plan may use explicitly curated openings for profiled
-  maps (with mode-level fallbacks elsewhere); those directions are rules, never model output.
+- **Map geometry and literal mechanics:** the static, dark/offline foundation now exists, but the
+  current catalogs do not contain verified collision or complete combat data. Production sourcing,
+  versioned annotation, and held-out hybrid evaluation remain open; match rows still contain no
+  positional data. See [`docs/spatial-world-model.md`](docs/spatial-world-model.md).

@@ -59,10 +59,16 @@ overlay on the user's seat — is unchanged.
 
 ```bash
 # home box, IP-locked key:
-PYTHONPATH=backend python -m bsdraft.collect.profiles --limit 20000 --recent-days 30   # -> data/raw/profiles.jsonl
+PYTHONPATH=backend python -m bsdraft.collect.profiles --limit 500 --recent-days 35            # collect a bounded profile batch
 PYTHONPATH=backend python backend/scripts/export_itemstats.py                          # -> data/processed/itemstats.json.gz
 PYTHONPATH=backend python -m bsdraft.collect.publish --only-itemstats                  # -> GitHub Release asset
 ```
+
+For the long-running home daemon, add `--itemstats` to the crawler command. It profiles a bounded
+batch each cycle (defaults: 500 new profiles, players seen in the last 35 days, re-profiled after
+21 days), rebuilds the table, and publishes it alongside the other release artifacts when
+`--publish` is enabled. The standalone `profiles` command remains useful for a larger one-off
+backfill.
 
 Set `ITEMSTATS_URL` on the API to the Release asset; it syncs on the refresh loop and the loadout
 loader picks up the new file on the next request. Build against the **same reference snapshot** as

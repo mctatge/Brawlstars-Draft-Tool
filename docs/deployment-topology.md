@@ -11,11 +11,12 @@ live site.
 The crawler runs on a home machine via four launchd plists under `deploy/`: crawler
 (`com.bsdraft.crawler`), API (`com.bsdraft.api`), tunnel (`com.bsdraft.tunnel`), and the
 IP-lockout watchdog (`com.bsdraft.watchdog`, below). It publishes `matches.jsonl.gz` +
-`winprob.npz` + precomputed stats, rank-index, and meta-drift-report artifacts to a
-GitHub Release.
+`winprob.npz` + precomputed stats, rank-index, meta-drift-report, and itemstats artifacts
+to a GitHub Release.
 
-The crawler agent runs with `--retrain-on-shift`, so a detected meta shift auto-retrains and
-republishes the model. The one manual path left is a **new brawler**: run
+The crawler agent runs with `--dispatch-retrain-on-shift`, so a detected meta shift dispatches
+the GitHub Actions retrain workflow and republishes the model. The one manual path left is a
+**new brawler**: run
 `backend/scripts/refresh_reference.py` + retrain + a commit (the reference JSONs are bundled
 into the repo).
 
@@ -49,7 +50,7 @@ The watchdog re-reads `.env` each cycle, so it confirms the fix with a one-shot
 ## Cloud API (Render, no key)
 
 The Render API (`render.yaml`) pulls via `DATA_URL` / `MODEL_URL` / `STATS_URL` /
-`RANK_INDEX_URL` / `META_REPORT_URL` every `REFRESH_SECONDS` and **hot-swaps rebuilt stats
+`RANK_INDEX_URL` / `META_REPORT_URL` / `ITEMSTATS_URL` every `REFRESH_SECONDS` and **hot-swaps rebuilt stats
 and a reloaded model with no restart** (see `data/sync.py` and the `_refresh_loop` /
 `lifespan` in `api/main.py`).
 

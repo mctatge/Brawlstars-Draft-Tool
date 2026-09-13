@@ -4,7 +4,8 @@ A personalized page (`/purchases`) that ranks a player's most *efficient* next p
 their live roster and Ranked bracket: power climbs, gadgets, star powers, gears, hypercharges, and
 new-brawler unlocks. It is the inverse of the [loadout advisor](item-winrate.md): that tells you
 which *owned* item to equip; this tells you which *unowned* purchase is most worth the coins.
-(Buffies are deliberately not advised — see the buffie note under *Data reality*.)
+(Buffies affect draft readiness, but are not yet purchase recommendations — see the Buffy note
+under *Data reality*.)
 
 Read this before touching `engine/purchases.py`, the `/api/purchases` endpoint, the
 `economy.json` reference, or `frontend/components/PurchaseAdvisor.tsx`.
@@ -25,17 +26,22 @@ a live roster (105-brawler account), every field the advisor needs is present an
 The player's **Ranked bracket** comes from `/api/rank` (live-first via the keyed tunnel); it sets
 the power floor below and picks the bracket's stats table.
 
-**Blind spots:** all currency balances; the equipped loadout (ownership only); and the *catalogs*
-of what gears / hypercharges / buffies exist per brawler (none are catalog-backed). Hypercharge
-availability is handled by a curated policy (below).
+**Blind spots:** all currency balances; the equipped loadout (ownership only); and the upstream
+*catalogs* of what gears / hypercharges / Buffies exist per brawler (none are catalog-backed).
+Hypercharge and Buffy availability are handled by curated policies.
 
-**Buffies are not advised.** The roster carries a `buffies: {gadget, starPower, hyperCharge}` object,
-but its `True` flags only say which buffies you *own* — never how many *exist* for the brawler. A
-brawler with no buffie released (e.g. R-T) is all-`False`, indistinguishable from one whose buffies
-you just haven't unlocked (verified against maxed top-100 rosters). The earlier model read the fixed
-3-key object as three fillable slots, so it flagged "Buy a Buffie" on every buffie-less brawler. With
-no reliable slot total, buffies are left out of the advisor (and of `engine/mastery.py` scoring)
-entirely. Reviving them would need a curated `buffie_availability` policy like the hypercharge one.
+**Buffies affect picks, but are not advised as purchases yet.** The roster carries a
+`buffies: {gadget, starPower, hyperCharge}` object, whose flags say only which gameplay Buffies the
+player owns. `data/reference/buffies.json` now resolves the previously ambiguous all-false case by
+listing the brawlers whose three gameplay Buffies have actually shipped. The draft scorer uses that
+policy and applies a transparent, estimated 0.010 readiness deficit per missing Buffy; old or
+partial roster data stays neutral, and brawlers without released Buffies are never flagged.
+
+The purchase advisor still omits them. Ranking a purchase needs a reviewed cost/package model and
+a value prior in the advisor's relative-lift units, not merely the readiness correction used to
+compare two fielded copies. Adding a half-specified "Buy a Buffy" row here would look precise while
+mixing those units. The fourth, cosmetic Buffy is excluded from both paths because it has no match
+effect and is not part of the roster's three-boolean gameplay object.
 
 ## Scoring (product decisions, revised 2026-08-19)
 

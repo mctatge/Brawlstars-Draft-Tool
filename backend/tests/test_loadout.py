@@ -26,6 +26,14 @@ def test_classify_effect_buckets():
     assert L._classify("some brand new mechanic with no keywords") == "utility"
 
 
+def test_classify_catalog_text_is_word_aware_and_handles_projectile_defense():
+    assert L._classify("Poco removes adverse effects and grants immunity") == "sustain"
+    assert L._classify("Pam removes ammo from opposing Brawlers") == "reload"
+    assert L._classify("El Primo flexes and destroys incoming projectiles for 2 sec") == "projectile_defense"
+    assert L._classify("Sprout destroys its Hedge, but instantly has its Super fully charged") == "super_charge"
+    assert L._classify("Darryl spins around, dealing damage and recharging his Super") == "damage"
+
+
 def test_clean_strips_value_tokens():
     assert L._clean("slows for <!card.value1.ticks> sec") == "slows for sec"
     assert L._clean("  extra   spaces ") == "extra spaces"
@@ -36,6 +44,34 @@ def test_mode_fit_is_mode_sensitive():
     assert L._mode_fit("mobility", "Brawl Ball") > L._mode_fit("mobility", "Heist")
     assert L._mode_fit("sustain", "Knockout") > L._mode_fit("sustain", "Heist")
     assert L._mode_fit("damage", "Heist") > L._mode_fit("damage", "Gem Grab")
+
+
+def test_super_charge_is_classified_and_r_t_gadget_varies_by_mode():
+    rt = R.brawler_by_name("R-T")
+    assert rt is not None
+    assert L._classify(rt.gadgets[0].description) == "super_charge"
+
+    picks = {
+        mode: next(g["name"] for g in L.loadout_advice(rt.id, mode)["gadgets"]
+                   if g["recommended"])
+        for mode in ("Gem Grab", "Brawl Ball", "Knockout", "Heist", "Hot Zone", "Bounty")
+    }
+    assert picks["Gem Grab"] == "Out Of Line"
+    assert picks["Heist"] == "Hacks"
+    assert len(set(picks.values())) == 2
+
+
+def test_el_primo_gadgets_match_current_rework():
+    primo = R.brawler_by_name("El Primo")
+    assert primo is not None
+    assert primo.gadgets[0].description == (
+        "El Primo Dashes, grabbing any hit enemies and suplexing them behind him."
+    )
+    assert primo.gadgets[1].description.startswith(
+        "El primo flexes his pecs and destroys any incoming projectiles"
+    )
+    assert L._classify(primo.gadgets[0].description) == "mobility"
+    assert L._classify(primo.gadgets[1].description) == "projectile_defense"
 
 
 def test_loadout_advice_shape_and_single_recommendation():
@@ -363,19 +399,48 @@ def test_parse_roster_retains_owned_item_ids():
     assert m.has_starpower and m.has_gadget and m.has_gears
 
 
-def test_buffies_are_never_a_gap_or_a_build_penalty():
-    # R-T has no buffies in the game — its `buffies` object is all-False even on maxed top-100
-    # rosters. The old model read the fixed 3-key object as 3 fillable slots and flagged every
-    # under-buffied brawler "missing buffie" (and docked its build ~0.30). Buffies are now unscored:
-    # a fully-owned loadout scores build == 1.0 and emits no buffie gap, whatever the buffies say.
+def test_all_false_buffies_do_not_penalize_a_brawler_without_released_buffies():
+    # R-T has no Buffies in the game — its object is all-False even on maxed top-100 rosters. The
+    # curated availability policy, not the fixed three-key object, must decide whether false means
+    # "missing". This is the false-positive that caused Buffy scoring to be removed originally.
+    rt = R.brawler_by_name("R-T")
+    assert rt is not None
     player = {"brawlers": [{
-        "id": 16000000, "power": 11,
+        "id": rt.id, "power": 11,
         "starPowers": [{"id": 1}], "gadgets": [{"id": 2}],
         "gears": [{"id": 5, "name": "Speed", "level": 3}],
         "hyperCharges": [{"id": 9}],
         "buffies": {"gadget": False, "starPower": False, "hyperCharge": False},
     }]}
-    m = mastery.parse_roster(player)[16000000]
+    m = mastery.parse_roster(player)[rt.id]
     assert m.build == 1.0
     assert m.gaps() == []
-    assert not hasattr(m, "buffies_total")  # the misleading slot count is gone entirely
+
+
+def test_eligible_buffies_are_normalized_into_build_and_exact_gaps():
+    gus = R.brawler_by_name("Gus")
+    assert gus is not None and R.has_buffies(gus.id)
+    player = {"brawlers": [{
+        "id": gus.id, "power": 11,
+        "starPowers": [{"id": 1}], "gadgets": [{"id": 2}],
+        "gears": [{"id": 5, "name": "Speed", "level": 3}],
+        "hyperCharges": [{"id": 9}],
+        "buffies": {"gadget": False, "starPower": True, "hyperCharge": False},
+    }]}
+    m = mastery.parse_roster(player)[gus.id]
+    assert m.buffies == {"gadget": False, "star_power": True, "hypercharge": False}
+    assert m.build == 0.8       # 7 base shares + 1 owned Buffy, over 10 known shares
+    assert m.gaps() == ["no gadget buffie", "no hyper buffie"]
+
+
+def test_absent_buffie_object_is_unknown_and_neutral():
+    gus = R.brawler_by_name("Gus")
+    player = {"brawlers": [{
+        "id": gus.id, "power": 11,
+        "starPowers": [{"id": 1}], "gadgets": [{"id": 2}],
+        "gears": [{"id": 5, "name": "Speed", "level": 3}],
+        "hyperCharges": [{"id": 9}],
+    }]}
+    m = mastery.parse_roster(player)[gus.id]
+    assert m.buffies is None
+    assert m.build == 1.0 and m.gaps() == []

@@ -14,7 +14,10 @@ list of :class:`Reason` chips explaining it. Every reason carries its provenance
 
 That third source exists because being honest about an unknown beats pretending it is zero.
 Hypercharge is the case: battle logs carry no hypercharge field, so no estimator exists on the
-data in hand. It ships visible and unpriced rather than silently ignored.
+data in hand. It ships visible and unpriced rather than silently ignored. Functional Buffies are
+observable on the live roster and their availability is curated, so missing ones are priced with
+a deliberately conservative estimated prior; there is not yet enough ownership history to measure
+their outcome effect.
 
 Pure stdlib and safe on the serve path — the numpy-backed estimator that *produces* the constants
 is :mod:`bsdraft.data.readiness_build`, which this module must never import. The constants below
@@ -29,6 +32,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 from bsdraft.constants import REFERENCE_DIR
+from bsdraft.data.reference import BUFFIE_SLOTS
 
 READINESS_PATH = REFERENCE_DIR / "readiness.json"
 
@@ -43,6 +47,9 @@ UNPRICED = "unpriced"
 GAP_NO_STAR_POWER = "no star power"
 GAP_NO_GADGET = "no gadget"
 GAP_NO_HYPERCHARGE = "no hypercharge"
+GAP_NO_GADGET_BUFFIE = "no gadget buffie"
+GAP_NO_STAR_BUFFIE = "no star buffie"
+GAP_NO_HYPER_BUFFIE = "no hyper buffie"
 
 MAX_POWER = 11
 
@@ -61,6 +68,11 @@ MISSING_STAR_POWER = 3 * UNIT   # 0.021
 MISSING_GADGET = 2 * UNIT       # 0.014
 MISSING_GEAR_SLOT = 1 * UNIT    # 0.007, per empty slot
 MISSING_HYPERCHARGE = 0.0       # unpriced — no estimator exists (see module docstring)
+# Equal per-slot prior: the API tells us ownership and the curated table tells us existence, but
+# match logs cannot identify which Buffy was fielded. At 1 point each, every individual prior is
+# below a missing gadget/star power and even the full three-slot set (0.030) stays below the
+# smallest measured power deficit (Power 10, 0.040).
+MISSING_BUFFIE = 0.010
 
 # Ranked opens the two gear slots at Power 8 and Power 10 (mirrors engine.purchases._GEAR_SLOT_POWERS).
 # Used to charge only for slots the brawler can actually fill: a Power 9 copy has one slot, so
@@ -102,6 +114,10 @@ class Fielded:
     has_gadget: bool = True
     n_gears: int = 2
     has_hypercharge: bool = True
+    # Canonical functional ownership. ``None`` means an old/unknown roster wire and is neutral;
+    # explicit false values mean missing, but only when the candidate's curated availability is
+    # confirmed by the caller. Partial dictionaries leave absent slots unknown rather than false.
+    buffies: Optional[Dict[str, bool]] = None
 
     @property
     def power_known(self) -> bool:
@@ -117,10 +133,11 @@ class Fielded:
     @classmethod
     def ready(cls) -> "Fielded":
         """A fully-fielded copy — the brawler the meta number already describes. Zero deficit."""
-        return cls()
+        return cls(buffies={slot: True for slot in BUFFIE_SLOTS})
 
     @classmethod
-    def from_gaps(cls, power: int, gaps: Optional[List[str]], n_gears: int = 2) -> "Fielded":
+    def from_gaps(cls, power: int, gaps: Optional[List[str]], n_gears: int = 2,
+                  buffies: Optional[Dict[str, bool]] = None) -> "Fielded":
         """Build from the client-sent wire shape: a power level, the gap strings, and how many
         gears the player owns. Gaps are the only signal for star power / gadget / hypercharge —
         :meth:`Mastery.gaps` emits no gear string, so the count is passed separately."""
@@ -131,6 +148,8 @@ class Fielded:
             has_gadget=GAP_NO_GADGET not in g,
             n_gears=int(n_gears or 0),
             has_hypercharge=GAP_NO_HYPERCHARGE not in g,
+            buffies=(None if buffies is None else
+                     {slot: bool(buffies[slot]) for slot in BUFFIE_SLOTS if slot in buffies}),
         )
 
     @classmethod
@@ -142,6 +161,7 @@ class Fielded:
             has_gadget=bool(getattr(m, "has_gadget", True)),
             n_gears=len(getattr(m, "owned_gears", ()) or ()),
             has_hypercharge=bool(getattr(m, "has_hypercharge", True)),
+            buffies=getattr(m, "buffies", None),
         )
 
 
@@ -190,7 +210,8 @@ def _power_points(power: int) -> float:
     return power_deficit_table().get(min(power, MAX_POWER), 0.0)
 
 
-def readiness(f: Optional[Fielded], confidence: float = 0.0) -> Tuple[float, List[Reason]]:
+def readiness(f: Optional[Fielded], confidence: float = 0.0, *,
+              buffies_available: bool = False) -> Tuple[float, List[Reason]]:
     """``(deficit, reasons)`` for one candidate. Deficit is >= 0 and is *subtracted* by the caller.
 
     ``confidence`` is the player's own sample confidence on this brawler, and it **fades the
@@ -218,6 +239,21 @@ def readiness(f: Optional[Fielded], confidence: float = 0.0) -> Tuple[float, Lis
         raw.append((label, empty_slots * MISSING_GEAR_SLOT, ESTIMATED))
     if not f.has_hypercharge:
         raw.append((GAP_NO_HYPERCHARGE, MISSING_HYPERCHARGE, UNPRICED))
+    if buffies_available and f.buffies is not None:
+        labels = {
+            "gadget": GAP_NO_GADGET_BUFFIE,
+            "star_power": GAP_NO_STAR_BUFFIE,
+            "hypercharge": GAP_NO_HYPER_BUFFIE,
+        }
+        for slot in BUFFIE_SLOTS:
+            if slot in f.buffies and not f.buffies[slot]:
+                # A Hyper Buffy cannot affect a fielded copy below Power 11. The measured power
+                # deficit already prices the locked P11 capability, just as gear_slots avoids
+                # billing a Power 9 copy for its still-locked second gear slot. Unknown power is
+                # fail-neutral too; Mastery.gaps still exposes the ownership fact for display.
+                if slot == "hypercharge" and (not f.power_known or f.power < MAX_POWER):
+                    continue
+                raw.append((labels[slot], MISSING_BUFFIE, ESTIMATED))
 
     total = sum(pts for _, pts, _ in raw)
     if total <= 0:
@@ -255,6 +291,9 @@ def clamp_score(v: float) -> float:
 
 def _ordering_invariant_holds() -> bool:
     """No declared prior may outrank a measurement. Asserted in the tests, not at import."""
-    priors = (MISSING_STAR_POWER, MISSING_GADGET, MISSING_GEAR_SLOT)
+    # Treat all three Buffies as one declared package too: the aggregate should not sneak past the
+    # invariant merely because each slot was represented by a separate reason chip.
+    priors = (MISSING_STAR_POWER, MISSING_GADGET, MISSING_GEAR_SLOT,
+              len(BUFFIE_SLOTS) * MISSING_BUFFIE)
     measured = [v for v in power_deficit_table().values() if v > 0]
     return bool(measured) and max(priors) < min(measured)

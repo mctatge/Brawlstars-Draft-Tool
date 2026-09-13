@@ -276,7 +276,12 @@ def score_candidate(state: DraftState, candidate: int, stats, model=None, weight
     # readiness) individually explained. Nothing here renormalizes the blend, so the same board
     # yields the same `base` whether or not a roster is loaded — which is what lets the meta and
     # roster columns print comparable percentages.
-    deficit, reasons = readiness(fielded, personal_conf)
+    # The roster says which Buffies the player owns, never whether this brawler has any to own.
+    # The cumulative reference policy supplies that second half. Missing/old ownership stays
+    # neutral inside readiness; all-false is actionable only for a confirmed eligible candidate.
+    deficit, reasons = readiness(
+        fielded, personal_conf, buffies_available=R.has_buffies(candidate),
+    )
 
     edge = item_edge()
     item_adj = 0.0 if edge is None else max(-ITEM_EDGE_CAP, min(ITEM_EDGE_CAP, edge))

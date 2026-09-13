@@ -30,15 +30,15 @@ This project keeps that as a *baseline* and adds layers that no single competito
 | 🎯 **Win-probability model** | Learned brawler + map embeddings predict `P(win)` for any 3v3 vs 3v3 on any map. Calibrated (ECE ≈ 0.01). |
 | 🔮 **Partial-draft native** | Trained on masked comps, the model scores the board *as it stands* — first pick, mid-snake, or blind pick — marginalizing over how real drafts continued from that position. No fill-in guesses, no separate search pass. |
 | ⚖️ **Composition warnings** | Flags comp holes: no frontline, no long range, double-tank, "enemy is tank-heavy — bring a Marksman," mode-specific advice. |
-| 👤 **Roster mastery** | Personalizes to *your* account: restricts to owned brawlers and weights by power level, comfort (personal trophies), and build completeness — including **buffies**. |
-| 🔍 **Explainability** | Every suggestion shows a transparent per-signal breakdown (map / synergy / counter / role / model / mastery) and a sample-size confidence. |
+| 👤 **Roster readiness** | Personalizes to *your* account: restricts to brawlers you can field, prices power and missing build pieces — including released **Buffies** — and conservatively nudges from your own record. |
+| 🔍 **Explainability** | Every suggestion shows its objective signals, sample confidence, and the signed account adjustments that turn the meta baseline into your score. |
 
 ## Features
 
 - **Ban + pick phases** with a clickable draft board (6 bans, 3v3, unique picks).
 - **Live recommendations** that re-rank instantly as the draft fills in.
 - **Map-aware**: 100+ maps across the 6 current ranked modes, with per-map stats.
-- **Personalize toggle** for roster mastery.
+- **Personalize toggle** for roster readiness and account history.
 - **Transparent scoring** — no black box; every number is shown.
 
 ## Architecture
@@ -93,14 +93,19 @@ holds **by construction** — no team-order bias and no global offset to learn. 
 term captures specific matchups (brawler X beats Y) that a pure strength model can't express.
 
 **3. Draft engine.** Given a draft state, it fuses the model with empirical map win-rates,
-synergy, counters, role-fit, and (optionally) your mastery into one transparent score — a
-*renormalized* weighted average over only the signals that are **active** so far (synergy needs
-allies, counters need a revealed enemy, mastery needs your roster):
+synergy, counters, and role-fit into a transparent, *renormalized* weighted average over only the
+objective signals that are **active** so far (synergy needs allies; counters need a revealed
+enemy):
 
 $$
-\mathrm{score}(b) = \frac{\sum_{k \in \mathcal{A}} \omega_k\, v_k(b)}{\sum_{k \in \mathcal{A}} \omega_k}, \qquad
-\mathcal{A} \subseteq \{\, \text{map},\ \text{model},\ \text{counter},\ \text{synergy},\ \text{role},\ \text{mastery} \,\}
+\mathrm{base}(b) = \frac{\sum_{k \in \mathcal{A}} \omega_k\, v_k(b)}{\sum_{k \in \mathcal{A}} \omega_k}, \qquad
+\mathcal{A} \subseteq \{\, \text{map},\ \text{model},\ \text{counter},\ \text{synergy},\ \text{role} \,\}
 $$
+
+When an account is loaded, signed post-adjustments turn that common baseline into the personal
+score: a readiness deficit for power/loadout/Buffy gaps, a measured item edge when available, and
+a tightly capped personal-history edge. Mastery is shown as context rather than mixed into the
+objective blend, so the meta and personal percentages stay comparable.
 
 The model reads **unfinished drafts natively**. During training, every match is also shown with
 random slots hidden behind a learned *unknown-slot* embedding $e_{\varnothing}$, drawn across the

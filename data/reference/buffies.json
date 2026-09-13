@@ -1,0 +1,42 @@
+{
+  "_comment": "Cumulative availability of the three gameplay-affecting Buffies exposed by the player roster. The API reports ownership only, so this curated policy is what distinguishes 'owns none' from 'none released'. Maintain from official release notes; stale data safely under-penalizes newly added brawlers. The cosmetic Buffy introduced later is deliberately excluded because it has no gameplay effect and is not in the roster object.",
+  "schema": 1,
+  "as_of": "2026-09-13",
+  "slots": ["gadget", "star_power", "hypercharge"],
+  "brawlers": {
+    "Shelly": 16000000,
+    "Colt": 16000001,
+    "Bull": 16000002,
+    "Brock": 16000003,
+    "Rico": 16000004,
+    "Spike": 16000005,
+    "Nita": 16000008,
+    "El Primo": 16000010,
+    "Mortis": 16000011,
+    "Crow": 16000012,
+    "Poco": 16000013,
+    "Bo": 16000014,
+    "Frank": 16000020,
+    "Leon": 16000023,
+    "Bibi": 16000026,
+    "8-Bit": 16000027,
+    "Emz": 16000030,
+    "Max": 16000032,
+    "Surge": 16000038,
+    "Colette": 16000039,
+    "Amber": 16000040,
+    "Edgar": 16000043,
+    "Griff": 16000050,
+    "Meg": 16000052,
+    "Gus": 16000061,
+    "Chuck": 16000073,
+    "Shade": 16000086
+  },
+  "sources": [
+    "https://supercell.com/en/games/brawlstars/blog/news/new-power-brawl-pass-changes-and-a-new-starr-drop-2/",
+    "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-february-2026/",
+    "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-april-2026/",
+    "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-june-2026/",
+    "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-august-2026/"
+  ]
+}

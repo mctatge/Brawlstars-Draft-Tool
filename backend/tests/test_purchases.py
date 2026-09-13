@@ -440,8 +440,8 @@ def test_hypercharge_policy_and_missing_section():
 
 
 def test_no_buffie_recommendations():
-    """Buffies are unadvised: the roster reports which buffies you own but not how many exist, so
-    'slot open' can't be told from 'no buffie released' (R-T has none)."""
+    """Draft readiness understands Buffy availability, but purchase advice still needs a cost and
+    relative-lift package model; it must not reuse the readiness prior in incompatible units."""
     recs = _run({1: OwnedState(power=11, **_maxed(1))}, {1: 0.55})
     assert not _by(recs, brawler_id=1, kind="buffie")
 

@@ -575,7 +575,7 @@ async def roster(tag: Optional[str] = None):
                 owned_gadgets=list(m.owned_gadgets),
                 owned_gears=[S.OwnedGear(**g) for g in m.owned_gears],
                 # Progression state the purchase advisor needs (already parsed by Mastery).
-                power=m.power, has_hypercharge=m.has_hypercharge,
+                power=m.power, has_hypercharge=m.has_hypercharge, buffies=m.buffies,
             )
             for bid, m in r.items()
         ]
@@ -762,22 +762,26 @@ class _ReqMastery:
     ``.fielded()`` readiness view the scorer prices. Lets the public backend personalize from a
     roster the client fetched (via the keyed tunnel) but the backend itself can't reach.
 
-    Power and the gear count are kept, not just the gate's verdict on them: the floor decides
-    whether a brawler is *selectable*, while readiness prices how far the selectable copy is from
-    the maxed one the meta table describes. Both read the same wire field."""
-    __slots__ = ("score", "_gaps", "_power", "_n_gears")
+    Power, gear count, and optional Buffy ownership are kept, not just the gate's verdict on them:
+    the floor decides whether a brawler is *selectable*, while readiness prices how far the
+    selectable copy is from the maxed one the meta table describes. An absent Buffy object means
+    an older roster schema and stays neutral; explicit false flags are joined to curated
+    availability by the scorer."""
+    __slots__ = ("score", "_gaps", "_power", "_n_gears", "_buffies")
 
-    def __init__(self, score: float, gaps: List[str], power: int = 0, n_gears: int = 0):
+    def __init__(self, score: float, gaps: List[str], power: int = 0, n_gears: int = 0,
+                 buffies: Optional[dict] = None):
         self.score = max(0.0, min(1.0, float(score)))
         self._gaps = list(gaps or [])
         self._power = int(power or 0)
         self._n_gears = int(n_gears or 0)
+        self._buffies = None if buffies is None else dict(buffies)
 
     def gaps(self) -> List[str]:
         return self._gaps
 
     def fielded(self) -> Fielded:
-        return Fielded.from_gaps(self._power, self._gaps, self._n_gears)
+        return Fielded.from_gaps(self._power, self._gaps, self._n_gears, self._buffies)
 
 
 class _BoostedMastery:
@@ -833,8 +837,13 @@ def _roster_for(req: S.RecommendRequest):
     floor = min_power_for_bracket(req.rank_bracket)
     fieldable = lambda power: power == 0 or power >= floor
     if req.roster is not None:
-        roster = {e.id: _ReqMastery(e.mastery, e.gaps, e.power, len(e.owned_gears or ()))
-                  for e in req.roster if fieldable(e.power)}
+        roster = {
+            e.id: _ReqMastery(
+                e.mastery, e.gaps, e.power, len(e.owned_gears or ()),
+                e.buffies.model_dump(exclude_none=True) if e.buffies is not None else None,
+            )
+            for e in req.roster if fieldable(e.power)
+        }
     elif _engine.roster:
         roster = {bid: m for bid, m in _engine.roster.items() if fieldable(m.power)}
     else:

@@ -1,0 +1,86 @@
+"""Spatial world-model foundations.
+
+No world feature is fused into draft recommendations until real map collision data and
+patch-pinned mechanics have been verified and evaluated in shadow mode.
+"""
+
+from bsdraft.world.evaluator import (
+    DuelRead,
+    PositionedBrawler,
+    evaluate_duel,
+    objective_coverage,
+    objective_travel_time,
+    shots_to_defeat,
+    team_duel_edge,
+    theoretical_time_to_kill,
+)
+from bsdraft.world.geometry import (
+    attack_in_range,
+    attackable_cells,
+    can_attack,
+    can_target_point,
+    cell_center,
+    cell_traversable,
+    in_bounds,
+    position_occupiable,
+    projectile_clear,
+    shortest_path_distance,
+    shortest_path_distance_to_any,
+    world_to_cell,
+)
+
+from bsdraft.world.schema import (
+    AttackProfile,
+    BrawlerMechanics,
+    DataSource,
+    DEFAULT_WORLD_MODEL_PATH,
+    LINE_OF_SIGHT_BLOCKING_TERRAIN,
+    MAX_ARTIFACT_BYTES,
+    MOVEMENT_BLOCKING_TERRAIN,
+    MapGeometry,
+    POWER_LEVEL,
+    SCHEMA_VERSION,
+    SourceImage,
+    TERRAIN_ALPHABET,
+    Vec2,
+    WorldModel,
+    load_world_model,
+)
+
+__all__ = [
+    "AttackProfile",
+    "BrawlerMechanics",
+    "DataSource",
+    "DEFAULT_WORLD_MODEL_PATH",
+    "DuelRead",
+    "LINE_OF_SIGHT_BLOCKING_TERRAIN",
+    "MAX_ARTIFACT_BYTES",
+    "MOVEMENT_BLOCKING_TERRAIN",
+    "MapGeometry",
+    "POWER_LEVEL",
+    "PositionedBrawler",
+    "SCHEMA_VERSION",
+    "SourceImage",
+    "TERRAIN_ALPHABET",
+    "Vec2",
+    "WorldModel",
+    "attack_in_range",
+    "attackable_cells",
+    "can_attack",
+    "can_target_point",
+    "cell_center",
+    "cell_traversable",
+    "evaluate_duel",
+    "in_bounds",
+    "load_world_model",
+    "objective_coverage",
+    "objective_travel_time",
+    "position_occupiable",
+    "projectile_clear",
+    "shortest_path_distance",
+    "shortest_path_distance_to_any",
+    "shots_to_defeat",
+    "team_duel_edge",
+    "theoretical_time_to_kill",
+    "world_to_cell",
+]
