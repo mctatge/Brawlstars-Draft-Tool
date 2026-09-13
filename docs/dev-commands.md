@@ -41,6 +41,16 @@ PYTHONPATH=backend python -m bsdraft.collect.profiles --limit 500 --recent-days 
 PYTHONPATH=backend python backend/scripts/export_itemstats.py                     # build itemstats.json.gz locally
 ```
 
+Live crawler loop (home machine): keep collection and artifact publishing local, but dispatch
+heavy model retrains to GitHub Actions on drift instead of training on the Mac:
+
+```bash
+PYTHONPATH=backend python backend/scripts/collect.py --loop 3600 --target 800 --publish --dispatch-retrain-on-shift
+```
+
+Use `--retrain-on-shift` only when you deliberately want the crawler process itself to run
+PyTorch training locally.
+
 Other scripts under `backend/scripts/`:
 
 - `smoke_test.py` — verify the API key works + inspect real response shapes.

@@ -1,0 +1,124 @@
+name: retrain-model
+
+# Heavy model retraining runs here instead of on the home crawler Mac. The crawler still owns
+# collection/publishing because the Supercell key is IP-allowlisted; this workflow downloads the
+# published dataset, trains with the production unattended flags, exports the NumPy serve artifact,
+# and uploads only winprob.npz when every gate passes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why this retrain was requested
+        required: false
+        default: manual
+      report_fingerprint:
+        description: Meta-drift fingerprint from the local crawler, if any
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # download/upload the data-latest release assets
+  issues: write     # open/update model-stale when the gate refuses a model
+
+concurrency:
+  group: retrain-model
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PYTHONPATH: backend
+      RETRAIN_REASON: ${{ inputs.reason || 'manual' }}
+      REPORT_FINGERPRINT: ${{ inputs.report_fingerprint || '' }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Download published match dataset
+        run: |
+          set -euo pipefail
+          mkdir -p data/raw
+          gh release download data-latest --pattern matches.jsonl.gz --dir data/raw --clobber
+          gzip -dc data/raw/matches.jsonl.gz > data/raw/matches.jsonl
+          rm data/raw/matches.jsonl.gz
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("data/raw/matches.jsonl")
+          n = sum(1 for _ in p.open("rb"))
+          print(f"downloaded {n:,} matches into {p} ({p.stat().st_size / 1e9:.2f} GB)")
+          PY
+          df -h .
+
+      - name: Train, export, and publish model
+        run: |
+          set -euo pipefail
+          python backend/scripts/train.py --class-synergy --candidates 3 --max-full-delta 0.0035
+          python backend/scripts/export_model.py
+          python -m bsdraft.collect.publish --only-model
+
+      - name: Close stale retrain issue after success
+        if: success()
+        run: |
+          set -euo pipefail
+          ISSUE=$(gh issue list --label model-stale --state open --limit 50 \
+            --json number,title \
+            --jq '.[] | select(.title | startswith("Remote model retrain failed")) | .number' \
+            | head -n1 || true)
+          if [ -n "${ISSUE:-}" ]; then
+            gh issue close "$ISSUE" --comment "Remote retrain succeeded and published a fresh model in ${RUN_URL}." \
+              || echo "Could not close model-stale issue #$ISSUE; model publish already succeeded."
+          else
+            echo "No open remote retrain issue to close."
+          fi
+
+      - name: Open or update stale retrain issue
+        if: failure()
+        run: |
+          set -euo pipefail
+          gh label create model-stale --color D93F0B \
+            --description "Automated: model retrain is failing or stale" --force
+
+          TITLE="Remote model retrain failed"
+          BODY="$RUNNER_TEMP/model-stale.md"
+          {
+            echo "The GitHub Actions model retrain did not publish a new \`winprob.npz\`."
+            echo
+            echo "- Run: ${RUN_URL}"
+            echo "- Reason: \`${RETRAIN_REASON}\`"
+            echo "- Drift fingerprint: \`${REPORT_FINGERPRINT:-none}\`"
+            echo
+            echo "The release asset was left untouched. Most failures are the full-comp regression gate in \`train.py\`, a capability-downgrade refusal in \`export_model.py\`, or a release upload/auth issue."
+            echo
+            echo "Production command:"
+            echo
+            echo '```bash'
+            echo "PYTHONPATH=backend python backend/scripts/train.py --class-synergy --candidates 3 --max-full-delta 0.0035"
+            echo "PYTHONPATH=backend python backend/scripts/export_model.py"
+            echo "PYTHONPATH=backend python -m bsdraft.collect.publish --only-model"
+            echo '```'
+          } > "$BODY"
+
+          ISSUE=$(gh issue list --label model-stale --state open --limit 50 \
+            --json number,title \
+            --jq '.[] | select(.title | startswith("Remote model retrain failed")) | .number' \
+            | head -n1 || true)
+          if [ -n "${ISSUE:-}" ]; then
+            gh issue edit "$ISSUE" --title "$TITLE" --body-file "$BODY"
+            echo "Updated model-stale issue #$ISSUE."
+          else
+            gh issue create --title "$TITLE" --label model-stale --body-file "$BODY"
+          fi

@@ -231,12 +231,12 @@ unconditionally, so each one went straight to the `data-latest` release and the 
 hot-swap. It was found only by loading the published `winprob.npz` and reading `_config`
 (`class_synergy: False`, no `class_syn` / `brawler_class` arrays) against `git show
 HEAD:data/processed/winprob.npz` (`True`, both arrays present). Three guards now: the flag is
-`BooleanOptionalAction` defaulting **on**, `collect.py` names it explicitly at the unattended
-call site, and `scripts/export_model.py` refuses to overwrite an artifact with one that has
+`BooleanOptionalAction` defaulting **on**, the unattended retrain workflow names it explicitly,
+and `scripts/export_model.py` refuses to overwrite an artifact with one that has
 fewer capabilities (a `True` config flag going `False`, a set value going `None`/absent — which
 is how `mask_row`, i.e. partial-draft support, would vanish — or a weight array disappearing),
 unless `--allow-capability-downgrade` is passed. The refusal exits non-zero on stderr, so
-`collect.py`'s existing stalled-retrain alert picks it up. See
+`retrain-model.yml` updates the `model-stale` issue instead of publishing. See
 `backend/tests/test_export_capability_guard.py`.
 
 Restoring it does **not** endanger the unattended retrain gate, which was the open worry — the

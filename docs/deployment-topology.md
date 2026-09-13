@@ -15,10 +15,18 @@ IP-lockout watchdog (`com.bsdraft.watchdog`, below). It publishes `matches.jsonl
 to a GitHub Release.
 
 The crawler agent runs with `--dispatch-retrain-on-shift`, so a detected meta shift dispatches
-the GitHub Actions retrain workflow and republishes the model. The one manual path left is a
-**new brawler**: run
+`.github/workflows/retrain-model.yml` instead of training on the laptop. That workflow downloads
+the published `matches.jsonl.gz`, trains with the same production command the old local retrain
+used (`train.py --class-synergy --candidates 3 --max-full-delta 0.0035`), exports
+`winprob.npz`, and uploads only that model asset when the train/export gates pass. The crawler
+persists a drift-report fingerprint and debounces repeat dispatches, so one week-long shifted
+window does not launch a retrain every hour. The one manual path left is a **new brawler**: run
 `backend/scripts/refresh_reference.py` + retrain + a commit (the reference JSONs are bundled
 into the repo).
+
+Do not put `--retrain-on-shift` back in the launchd crawler unless you explicitly want local
+PyTorch training again; it can consume several GB of RAM. The flag still exists as a manual escape
+hatch, but the always-on daemon should use the remote dispatch path.
 
 **Code changes to artifact builders stay dark until the crawler restarts.** The long-lived
 `com.bsdraft.crawler` process imports the build modules lazily and caches them, so after
@@ -75,6 +83,13 @@ A scheduled Action (`.github/workflows/keepwarm.yml`) pings `/api/health` to kee
 free tier out of cold-sleep, and once a day checks `/api/meta` (the drift detector in
 `engine/drift.py`) — filing a `meta-alert` GitHub issue when the meta shifts or a new
 brawler appears.
+
+The heavy retrain Action (`.github/workflows/retrain-model.yml`) is manual/dispatch-only. On
+GitHub's public standard `ubuntu-latest` runner it has 4 vCPU, 16 GB RAM, and 14 GB SSD; the repo
+checkout is tiny, and the workflow downloads only the compressed release dataset, decompresses it
+to `data/raw/matches.jsonl`, and removes the compressed copy. It does not use Actions cache or
+upload-artifact storage. If the model gate, export guard, or release upload fails, it leaves the
+existing release model untouched and opens/updates a `model-stale` issue.
 
 ## Per-visitor roster via Cloudflare Tunnel
 
