@@ -33,9 +33,13 @@ class _Brawler:
 
 
 class _Ref:
-    """Stand-in for data.reference — a fixed synthetic roster of brawlers."""
+    """Stand-in for data.reference — a fixed synthetic roster of brawlers (all released)."""
     def load_brawlers(self):
         return [_Brawler(i, f"B{i}", "Damage Dealer") for i in IDS]
+
+    def pickable_brawlers(self):
+        # `bans.recommend` reads the pickable subset; every synthetic brawler is live.
+        return self.load_brawlers()
 
 
 class _Rate:

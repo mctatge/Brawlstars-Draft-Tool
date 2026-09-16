@@ -450,9 +450,12 @@ def meta():
 
 @app.get("/api/reference", response_model=S.ReferenceResponse)
 def reference():
+    # `pickable_brawlers()`, not `load_brawlers()`: the frontend renders exactly this list as the
+    # draftable pool, so a datamined-but-unshipped brawler (released:false) must not appear here.
+    # The full list stays reserved for the model's pinned embedding vocabulary (see reference.py).
     brawlers = [
         S.BrawlerRef(id=b.id, name=b.name, cls=b.cls, rarity=b.rarity, image_url=b.image_url)
-        for b in R.load_brawlers()
+        for b in R.pickable_brawlers()
     ]
     # `load_ranked_maps()` is the catalog's *not-retired* set — every map still in the game's
     # files across all modes, ~113 of them. Ranked only rotates a handful per mode per season, so

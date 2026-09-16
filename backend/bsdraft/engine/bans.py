@@ -299,7 +299,9 @@ def recommend(state: DraftState, stats, model=None, top: int = 6, roster=None) -
     ordering rather than a half-built version of this one."""
     used = state.picked_or_banned()
     rows: List[BanScore] = []
-    for b in R.load_brawlers():
+    # Released brawlers only — a datamined-but-unshipped brawler (released:false) can't be banned
+    # in-game any more than it can be picked, so it must not surface as a ban target either.
+    for b in R.pickable_brawlers():
         if b.id in used:
             continue
         rate = stats.brawler_rate(b.id, state.map_id)

@@ -33,7 +33,9 @@ class DraftEngine:
 
     def candidates(self, state: DraftState, roster=None) -> List[int]:
         used = state.picked_or_banned()
-        ids = [b.id for b in R.load_brawlers() if b.id not in used]
+        # `pickable_brawlers()`, not `load_brawlers()`: never recommend a datamined-but-unshipped
+        # brawler (released:false) that nobody can select in-game.
+        ids = [b.id for b in R.pickable_brawlers() if b.id not in used]
         if roster is not None:
             ids = [i for i in ids if i in roster]  # only brawlers the player owns
         return ids

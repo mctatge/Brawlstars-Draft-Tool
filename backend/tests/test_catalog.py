@@ -27,6 +27,13 @@ def brawler(bid, name, cls="Tank", rarity="Rare", sp=(), gadgets=()):
     }
 
 
+def released(bid, name, is_released, **kw):
+    """A brawler carrying the catalog's `released` flag (datamined-but-unshipped when False)."""
+    b = brawler(bid, name, **kw)
+    b["released"] = is_released
+    return b
+
+
 BASE = [
     brawler(1, "Shelly", sp=[(101, "Shell Shock")], gadgets=[(201, "Fast Forward")]),
     brawler(2, "Colt", cls="Marksman", sp=[(102, "Slick Boots")]),
@@ -70,6 +77,54 @@ def test_rename_class_and_rarity_changes():
     assert kinds["rarity"] == "Rare -> Epic"
     # Reclassification is not destructive: nothing disappears.
     assert d.safe_to_automerge
+
+
+# --- released-flip detection (a datamined brawler going live) -------------------
+
+def test_release_flip_is_detected_and_automergeable():
+    # Buzz Lightyear's real shape: present but released:false, then flipped true with NOTHING
+    # else changing. The name/class/rarity diff is blind to this — only `released` moves — so
+    # without an explicit check the auto-merge never rewrites the snapshot and the pickable
+    # filter keeps hiding a now-live brawler.
+    before = [brawler(1, "Shelly"), released(2, "Buzz Lightyear", False, cls="Assassin")]
+    after = [brawler(1, "Shelly"), released(2, "Buzz Lightyear", True, cls="Assassin")]
+    d = C.diff_catalogs(before, after)
+    flips = [c for c in d.brawler_changes if c.change == "released"]
+    assert [c.name for c in flips] == ["Buzz Lightyear"]
+    assert flips[0].detail == "unreleased -> released"
+    assert flips[0].released is True
+    # Going live only adds fieldable content — nothing disappears — so it auto-merges.
+    assert d.changed and d.safe_to_automerge and not d.destructive
+    assert "release change" in d.summary()
+
+
+def test_pulling_a_brawler_from_release_needs_review():
+    # true -> false: a live brawler yanked back to datamined. Rare, and takes content away, so
+    # it must NOT land unattended.
+    before = [brawler(1, "Shelly"), released(2, "Kaze", True, cls="Assassin")]
+    after = [brawler(1, "Shelly"), released(2, "Kaze", False, cls="Assassin")]
+    d = C.diff_catalogs(before, after)
+    assert d.changed and not d.safe_to_automerge
+    assert any("pulled from release" in r for r in d.destructive)
+
+
+def test_absent_released_field_never_manufactures_a_flip():
+    # Existing snapshots/fixtures carry no `released` key. Absent must read as live on both
+    # sides so a plain diff of identical data reports no change (not a phantom released-change).
+    d = C.diff_catalogs(BASE, BASE)
+    assert not any(c.change == "released" for c in d.brawler_changes)
+    assert not d.changed
+
+
+def test_adding_an_unreleased_brawler_is_still_additive():
+    # A brand-new released:false entry is an "added" change (not a flip); it should auto-merge —
+    # the snapshot must keep it so load_brawlers() and the pinned model vocab stay in sync — but
+    # it is not "live". The added change records that for the PR wording.
+    after = BASE + [released(3, "Buzz Lightyear", False, cls="Unknown", rarity="Legendary")]
+    d = C.diff_catalogs(BASE, after)
+    (added,) = d.new_brawlers
+    assert added.name == "Buzz Lightyear" and added.released is False
+    assert d.changed and d.safe_to_automerge and not d.destructive
 
 
 # --- accessory-level changes ----------------------------------------------------
@@ -256,6 +311,35 @@ def test_render_pr_flags_destructive():
     _title, body = C.render_pr(d, "https://api.brawlapi.com/v1/brawlers")
     assert "Needs review — not auto-merged" in body
     assert "Colt" in body
+
+
+def test_render_pr_does_not_call_an_unreleased_addition_pickable():
+    # The whole point of the released flag: a released:false newcomer is in the snapshot but the
+    # PR must not claim the commit makes it pickable.
+    after = BASE + [released(3, "Buzz Lightyear", False, cls="Unknown", rarity="Legendary")]
+    d = C.diff_catalogs(BASE, after)
+    _title, body = C.render_pr(d, "https://api.brawlapi.com/v1/brawlers")
+    assert "Buzz Lightyear" in body
+    assert "unreleased — hidden from picks" in body        # flagged in the table
+    assert "hidden from the pickable lists" in body         # and in the note
+    assert "makes them pickable" not in body                # no live newcomer -> no such claim
+
+
+def test_render_pr_still_calls_a_live_addition_pickable():
+    after = BASE + [released(3, "Nori", True, cls="Assassin", rarity="Legendary")]
+    d = C.diff_catalogs(BASE, after)
+    _title, body = C.render_pr(d, "https://api.brawlapi.com/v1/brawlers")
+    assert "makes them pickable in the UI" in body
+
+
+def test_render_pr_surfaces_a_release_flip():
+    before = [brawler(1, "Shelly"), released(2, "Buzz Lightyear", False, cls="Assassin")]
+    after = [brawler(1, "Shelly"), released(2, "Buzz Lightyear", True, cls="Assassin")]
+    d = C.diff_catalogs(before, after)
+    _title, body = C.render_pr(d, "https://api.brawlapi.com/v1/brawlers")
+    assert "released: **Buzz Lightyear**" in body
+    assert "unreleased -> released" in body
+    assert "Needs review" not in body                       # going live is not destructive
 
 
 if __name__ == "__main__":

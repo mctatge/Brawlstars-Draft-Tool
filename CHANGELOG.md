@@ -4,6 +4,17 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-08-29
+
+- **An unreleased brawler no longer leaks into the draft.** Buzz Lightyear sits in the catalog
+  as a datamined-but-unshipped entry (`released:false`), and the tool was offering it as a pick
+  candidate and a ban target and listing it in the board's brawler picker — a brawler nobody can
+  actually select in Ranked. The draft surfaces (pick suggestions, ban list, `/api/reference`)
+  now serve released brawlers only. The full catalog is still kept internally so the win-prob
+  model's trained embedding rows stay aligned; the brawler simply reappears the moment it ships.
+  The catalog watcher is now `released`-aware, so when a datamined brawler goes live the snapshot
+  refreshes on its own and the pick returns without a manual edit.
+
 ## 2026-08-26
 
 - **Free brawlers you own at low power are recommended again.** When you own a brawler that's

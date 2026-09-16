@@ -64,12 +64,13 @@ class AccessoryChange:
 
 @dataclass
 class BrawlerChange:
-    change: str          # "added" | "removed" | "renamed" | "class" | "rarity"
+    change: str          # "added" | "removed" | "renamed" | "class" | "rarity" | "released"
     brawler_id: int
     name: str
     detail: str = ""     # e.g. "Damage Dealer -> Assassin"
-    old_value: str = ""  # for renamed/class/rarity — the previous value
+    old_value: str = ""  # for renamed/class/rarity/released — the previous value
     new_value: str = ""  # …and the new one, so safety rules don't parse `detail`
+    released: bool = True  # for "added"/"released": is the brawler live? (drives pickability wording)
 
 
 @dataclass
@@ -119,7 +120,14 @@ class CatalogDiff:
         for c in self._b("class"):
             if c.old_value and c.new_value in ("", "Unknown"):
                 why.append(f"class lost: {c.name} ({c.old_value} -> {c.new_value or 'missing'})")
-        edits = len(self._b("renamed")) + len(self._b("class")) + len(self._b("rarity"))
+        # A brawler being pulled from release (was live, now released:false) takes fieldable
+        # content away, just like a removal — flag it rather than auto-hide a live brawler.
+        for c in self._b("released"):
+            if c.old_value == "released" and c.new_value == "unreleased":
+                why.append(f"brawler pulled from release: {c.name} (#{c.brawler_id}) — "
+                           f"was live, now released:false")
+        edits = (len(self._b("renamed")) + len(self._b("class")) + len(self._b("rarity"))
+                 + len(self._b("released")))
         if edits > self.MAX_EDITS:
             why.append(f"{edits} edits to existing brawlers in one diff "
                        f"(> {self.MAX_EDITS}) — looks like a schema change, not a patch")
@@ -141,6 +149,7 @@ class CatalogDiff:
             ("renamed", self._b("renamed")),
             ("class change", self._b("class")),
             ("rarity change", self._b("rarity")),
+            ("release change", self._b("released")),
         ):
             for c in items:
                 suffix = f"  [{c.detail}]" if c.detail else ""
@@ -269,6 +278,16 @@ def _rarity_of(b: dict) -> str:
     return (b.get("rarity") or {}).get("name") or ""
 
 
+def _released_of(b: dict) -> bool:
+    """Whether the catalog considers this brawler live. The API flags datamined-but-unshipped
+    entries ``released:false`` (e.g. Buzz Lightyear, id 16000088). A *missing* field means the
+    payload predates the flag or a fixture omitted it, so default to True — the overwhelming
+    majority of the catalog is live, and treating absent-as-released stops a field the old
+    snapshot never carried from manufacturing a released-change on every diff."""
+    val = b.get("released")
+    return True if val is None else bool(val)
+
+
 def _accessories(brawlers: Iterable[dict]) -> Dict[int, Tuple[str, str, str]]:
     """accessory id -> (kind, brawler name, accessory name) across every brawler."""
     out: Dict[int, Tuple[str, str, str]] = {}
@@ -292,7 +311,8 @@ def diff_catalogs(before: List[dict], after: List[dict]) -> CatalogDiff:
     for bid in sorted(set(nb) - set(ob)):
         changes.append(BrawlerChange("added", bid, nb[bid].get("name", str(bid)),
                                      detail=" / ".join(x for x in (_rarity_of(nb[bid]),
-                                                                   _class_of(nb[bid])) if x)))
+                                                                   _class_of(nb[bid])) if x),
+                                     released=_released_of(nb[bid])))
     for bid in sorted(set(ob) - set(nb)):
         changes.append(BrawlerChange("removed", bid, ob[bid].get("name", str(bid))))
     for bid in sorted(set(ob) & set(nb)):
@@ -309,6 +329,17 @@ def diff_catalogs(before: List[dict], after: List[dict]) -> CatalogDiff:
             changes.append(BrawlerChange("rarity", bid, n.get("name", ""),
                                          detail=f"{_rarity_of(o) or '?'} -> {_rarity_of(n) or '?'}",
                                          old_value=_rarity_of(o), new_value=_rarity_of(n)))
+        # A `released` flip carries no name/class/rarity change, so the checks above are blind to
+        # it. Detect it explicitly: false -> true is a brawler going live (additive — the
+        # pickable filter must stop hiding it), true -> false is a brawler being pulled (rare;
+        # worth a human's eyes, handled in `destructive`).
+        if _released_of(o) != _released_of(n):
+            o_state = "released" if _released_of(o) else "unreleased"
+            n_state = "released" if _released_of(n) else "unreleased"
+            changes.append(BrawlerChange("released", bid, n.get("name", ""),
+                                         detail=f"{o_state} -> {n_state}",
+                                         old_value=o_state, new_value=n_state,
+                                         released=_released_of(n)))
 
     oa, na = _accessories(before), _accessories(after)
     acc: List[AccessoryChange] = []
@@ -439,12 +470,21 @@ def render_pr(diff: CatalogDiff, source_url: str,
     ]
     if new:
         lines += ["## 🆕 New brawlers", "",
-                  "| Brawler | Id | Rarity / class |", "|---|---|---|"]
+                  "| Brawler | Id | Rarity / class | Status |", "|---|---|---|---|"]
         for c in new:
-            lines.append(f"| **{c.name}** | `{c.brawler_id}` | {c.detail or '—'} |")
-        lines += ["",
-                  "_Until the model retrains they encode to embedding index 0; the catalog "
-                  "commit alone makes them pickable in the UI._", ""]
+            status = "live" if c.released else "unreleased — hidden from picks"
+            lines.append(f"| **{c.name}** | `{c.brawler_id}` | {c.detail or '—'} | {status} |")
+        # Only the *live* newcomers become pickable on commit — a `released:false` entry is
+        # recorded (so its id is reserved and the model can't collide on it) but stays hidden.
+        note: List[str] = []
+        if any(c.released for c in new):
+            note.append("Until the model retrains they encode to embedding index 0; for the "
+                        "**live** ones the catalog commit alone makes them pickable in the UI.")
+        if any(not c.released for c in new):
+            note.append("The **unreleased** ones (`released:false`) are recorded in the snapshot "
+                        "now but stay hidden from the pickable lists until their flag flips — the "
+                        "watcher opens a follow-up when it does.")
+        lines += ["", "_" + " ".join(note) + "_", ""]
     if class_overrides:
         lines += ["## 🏷 Class overrides added", "",
                   "The catalog tags brand-new brawlers as class `Unknown`, which would leave them "

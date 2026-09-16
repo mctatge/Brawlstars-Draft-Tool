@@ -61,6 +61,7 @@ class Brawler:
     star_powers: tuple
     gadgets: tuple
     image_url: str
+    released: bool = True  # catalog flag; False = datamined-but-unshipped (see pickable_brawlers)
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,9 @@ def load_brawlers() -> tuple:
                 for g in (x.get("gadgets") or [])
             ),
             image_url=x.get("imageUrl", ""),
+            # Absent -> released: an old snapshot predating the flag, or a fixture that omits it.
+            # The overwhelming majority of the catalog is live; only datamined entries are False.
+            released=bool(x.get("released", True)),
         )
         for x in raw
     ]
@@ -126,8 +130,32 @@ def load_brawlers() -> tuple:
 
 @lru_cache(maxsize=1)
 def brawler_index() -> dict:
-    """Stable brawler id -> contiguous index (0..N-1), sorted by id. For embeddings."""
+    """Stable brawler id -> contiguous index (0..N-1), sorted by id. For embeddings.
+
+    Built over EVERY catalog entry, released or not — the trained model's pinned vocabulary
+    (``winprob.npz`` ``_vocab_brawler_ids``) was exported from this full, id-sorted list, so
+    dropping an unreleased row would slide every later brawler onto a neighbour's trained
+    embedding. Unreleased brawlers are hidden at the draft surfaces instead — see
+    :func:`pickable_brawlers`."""
     return {b.id: i for i, b in enumerate(load_brawlers())}
+
+
+@lru_cache(maxsize=1)
+def pickable_brawlers() -> tuple:
+    """The brawlers a player can actually draft, ban, or own — released ones only.
+
+    The catalog carries datamined-but-unshipped brawlers flagged ``released:false`` (e.g. Buzz
+    Lightyear, id 16000088). :func:`load_brawlers` and :func:`brawler_index` must keep returning
+    *all* of them so the model's pinned embedding vocabulary stays row-aligned (see
+    :func:`brawler_index`), but the draft surfaces must never offer a brawler that isn't in the
+    game yet: the pick-candidate pool (:meth:`bsdraft.engine.engine.DraftEngine.candidates`), the
+    ban pool (:func:`bsdraft.engine.bans.recommend`), and the ``/api/reference`` list the frontend
+    renders all read from here instead.
+
+    Kept in sync automatically: the catalog watcher (:mod:`bsdraft.data.catalog`) is
+    ``released``-aware, so when a datamined entry ships (``released`` flips false -> true) it
+    refreshes ``brawlers.json`` and the brawler appears here on the next load."""
+    return tuple(b for b in load_brawlers() if b.released)
 
 
 @lru_cache(maxsize=1)
