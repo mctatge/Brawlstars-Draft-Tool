@@ -11,6 +11,14 @@ export const NAV = [
   { href: "/faq", label: "FAQ" },
 ];
 
+// Site-level pages linked from every footer (not the top bar, which is for the docs). AdSense
+// review asked for About and Contact to be discoverable; keep them next to Privacy everywhere.
+export const SITE_LINKS = [
+  { href: "/about", label: "About" },
+  { href: "/contact", label: "Contact" },
+  { href: "/privacy", label: "Privacy" },
+];
+
 // Tactical top bar shared by the written pages, so the docs read as the same console as the
 // board: mono nav, hairline rules, sharp corners. Long-form prose stays in the readable sans.
 export default function DocNav({ current }: { current: string }) {

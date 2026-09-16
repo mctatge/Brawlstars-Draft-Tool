@@ -12,7 +12,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   const pages = [
     "", "/how-it-works", "/faq", "/guide", "/guides",
     ...rankedModes().map((m) => `/guides/${m.slug}`),
-    "/purchases", "/model", "/privacy",
+    "/purchases", "/model", "/about", "/contact", "/privacy",
   ];
   return pages.map((p) => ({
     url: `${BASE}${p}`,

@@ -4,6 +4,14 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-09-04
+
+- **New About and Contact pages.** [About](https://brawldraft.com/about) says who builds Brawl
+  Draft and why — a one-person, open-source, unofficial fan project published under Supercell's
+  Fan Content Policy — and [Contact](https://brawldraft.com/contact) points bug reports and
+  feature requests at the public GitHub issue tracker. Both are linked from every footer next to
+  Privacy and listed in the sitemap.
+
 ## 2026-08-28
 
 - **The draft no longer recommends a brawler it has no data on.** A pick was only ever as good as

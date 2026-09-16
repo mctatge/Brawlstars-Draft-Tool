@@ -1,3 +1,5 @@
+import { SITE_LINKS } from "@/components/DocNav";
+
 // Server-rendered on purpose. DraftBoard is a client component that returns a BootScreen until
 // the API answers, so anything inside it is absent from the exported HTML — which means crawlers
 // (and the AdSense reviewer) would see the homepage as an empty shell with no links to the
@@ -13,7 +15,9 @@ export default function SiteFooter({ blurb }: { blurb?: string }) {
         <a href="/how-it-works" className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">How it works</a>
         <a href="/model" className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">The model</a>
         <a href="/faq" className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">FAQ</a>
-        <a href="/privacy" className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">Privacy</a>
+        {SITE_LINKS.map((n) => (
+          <a key={n.href} href={n.href} className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">{n.label}</a>
+        ))}
       </nav>
       <p className="mono text-[10px] leading-relaxed text-[var(--dim)] max-w-2xl mx-auto">
         {blurb && <>{blurb} · </>}
