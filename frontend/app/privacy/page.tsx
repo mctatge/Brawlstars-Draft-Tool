@@ -5,8 +5,8 @@ export const metadata: Metadata = {
   description: "What Brawl Draft stores and why: a player tag in your browser, public match data, and (if ads are enabled) Google AdSense.",
 };
 
-// Required for AdSense approval, and honest on its own terms: the site has no accounts and no
-// analytics, so there is genuinely little to disclose. Keep this page in sync with what the
+// Required for AdSense approval, and honest on its own terms: the site has no accounts and only
+// Cloudflare's cookieless Web Analytics, so there is genuinely little to disclose. Keep this page in sync with what the
 // board actually does — an inaccurate privacy policy is worse than none.
 export default function Privacy() {
   return (
@@ -25,7 +25,7 @@ export default function Privacy() {
       <header className="mb-7">
         <div className="label mb-3" style={{ color: "var(--accent)" }}>▸ PRIVACY</div>
         <h1 className="display text-[clamp(1.6rem,4vw,2.4rem)]">Privacy</h1>
-        <p className="mono text-[10px] text-[var(--dim)] mt-2 uppercase tracking-[0.1em]">Effective August 7, 2026</p>
+        <p className="mono text-[10px] text-[var(--dim)] mt-2 uppercase tracking-[0.1em]">Effective September 17, 2026</p>
         <div className="h-px w-full bg-[var(--line)] mt-5" />
       </header>
 
@@ -61,7 +61,9 @@ export default function Privacy() {
           <h2 className="font-semibold mb-1.5">Hosting</h2>
           <p className="text-[var(--muted)]">
             The site is served by Cloudflare Pages and the API runs on Render. Like nearly all web hosts, they
-            keep standard server logs (IP address, request time) to operate the service.
+            keep standard server logs (IP address, request time) to operate the service. Cloudflare Web Analytics
+            also counts page views and load times in aggregate; it does not use cookies or local storage and
+            does not identify you.
           </p>
         </section>
 

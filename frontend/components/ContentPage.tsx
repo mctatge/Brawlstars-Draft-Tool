@@ -1,7 +1,8 @@
-import DocNav, { NAV } from "@/components/DocNav";
+import DocNav, { NAV, SITE_LINKS } from "@/components/DocNav";
 
 export type Section = { heading: string; body: string; bullets?: string[] };
-export type Content = { title: string; intro: string; sections: Section[] };
+// `label` is the eyebrow above the title; the docs default to FIELD MANUAL, site pages override it.
+export type Content = { title: string; intro: string; sections: Section[]; label?: string };
 
 // Minimal inline formatter: the drafted copy only ever uses **bold** and [links](/href), so a
 // full markdown dependency would be dead weight in a static export. One alternation walks both.
@@ -42,10 +43,9 @@ export function DocFooter({ current }: { current: string }) {
   return (
     <footer className="mt-12 pt-5 border-t border-[var(--line)] text-xs text-[var(--muted)]">
       <div className="flex flex-wrap gap-x-1 gap-y-1.5 mb-3">
-        {NAV.filter((n) => n.href !== current).map((n) => (
+        {[...NAV, ...SITE_LINKS].filter((n) => n.href !== current).map((n) => (
           <a key={n.href} href={n.href} className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">{n.label}</a>
         ))}
-        <a href="/privacy" className="mono text-[10px] uppercase tracking-[0.08em] px-2 py-1 border border-[var(--line)] hover:border-[var(--line-strong)] hover:text-[var(--text)] ctl">Privacy</a>
       </div>
       <p className="mono text-[10px] leading-relaxed text-[var(--dim)]">
         This content is not affiliated with, endorsed, sponsored, or specifically approved by Supercell and Supercell is not
@@ -64,7 +64,7 @@ export default function ContentPage({ content, current }: { content: Content; cu
       <DocNav current={current} />
 
       <header className="mb-9">
-        <div className="label mb-3" style={{ color: "var(--accent)" }}>▸ FIELD MANUAL</div>
+        <div className="label mb-3" style={{ color: "var(--accent)" }}>▸ {content.label ?? "FIELD MANUAL"}</div>
         <h1 className="display text-[clamp(1.9rem,5vw,3rem)] mb-4">{content.title}</h1>
         <div className="h-px w-full bg-[var(--line)] mb-5" />
         <div className="text-[15px] leading-relaxed text-[var(--muted)]">

@@ -4,6 +4,16 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-09-17
+
+- **New About and Contact pages.** [About](https://brawldraft.com/about) says who builds Brawl
+  Draft and why: a one-person, open-source, unofficial fan project published under Supercell's
+  Fan Content Policy. [Contact](https://brawldraft.com/contact) points bug reports and feature
+  requests at the public GitHub issue tracker. Both are linked from the site footers and listed in
+  the sitemap.
+- **The Privacy page now mentions Cloudflare Web Analytics**, the cookieless page-view counter
+  Cloudflare already runs on the site.
+
 ## 2026-09-13
 
 - **Personal picks now account for the Buffies you actually own.** The roster keeps Gadget, Star,
