@@ -30,7 +30,7 @@ import {
 export const metadata: Metadata = {
   title: "The Model — 12,505 Parameters | Brawl Draft",
   description:
-    "The machine learning behind Brawl Draft, in full: an antisymmetric embedding network trained on 1,059,778 ranked matches, with the equations, the architecture diagrams, the held-out numbers, and the limits.",
+    "The machine learning behind Brawl Draft, in full: an antisymmetric embedding network trained on 1,615,154 ranked matches, with the equations, the architecture diagrams, the held-out numbers, and the limits.",
   alternates: { canonical: "/model" },
   openGraph: {
     // A route-level openGraph REPLACES the root layout's rather than merging with it, so the
@@ -116,9 +116,9 @@ export default function Page() {
 
           <div className="stats masthead-stats">
             <div className="stat"><div className="k">Trained parameters</div><div className="v tA">12,505</div><div className="n">Nine tensors. 70% of the weights are embedding lookups.</div></div>
-            <div className="stat"><div className="k">Ranked matches</div><div className="v">1,059,778</div><div className="n">Deduped, recency-weighted, real ranked play.</div></div>
-            <div className="stat"><div className="k">Calibration error</div><div className="v green">0.009</div><div className="n">Says 60%, wins ~60%. The headline result.</div></div>
-            <div className="stat"><div className="k">Held-out AUC</div><div className="v">0.625</div><div className="n">Full comps. The draft is not the whole game.</div></div>
+            <div className="stat"><div className="k">Ranked matches</div><div className="v">1,615,154</div><div className="n">Deduped, recency-weighted, real ranked play.</div></div>
+            <div className="stat"><div className="k">Calibration error</div><div className="v green">0.011</div><div className="n">Says 60%, wins ~60%. The headline result.</div></div>
+            <div className="stat"><div className="k">Held-out AUC</div><div className="v">0.630</div><div className="n">Full comps. The draft is not the whole game.</div></div>
             <div className="stat"><div className="k">Empty board</div><div className="v gold">0.5000</div><div className="n">Not learned. True by construction.</div></div>
           </div>
 
@@ -384,7 +384,7 @@ export default function Page() {
         {/* ============================ 06 WHAT IT'S WORTH ============================ */}
         <section id="worth" className="wrap">
           <SecHead n="06" title="What 12,505 parameters actually buy"
-            lede="Held out: 158,966 matches the model never saw. The interesting result is not the accuracy. It is that the probabilities can be trusted." />
+            lede="Held out: 242,273 matches the model never saw. The interesting result is not the accuracy. It is that the probabilities can be trusted." />
 
           <div className="stack">
             <div className="tablewrap">
@@ -393,14 +393,14 @@ export default function Page() {
                 <thead><tr><th>Predictor</th><th>Log-loss ↓</th><th>Accuracy ↑</th><th>AUC ↑</th><th>ECE ↓</th></tr></thead>
                 <tbody>
                   <tr><td>Always 0.5</td><td>0.6931</td><td>0.500</td><td>—</td><td>—</td></tr>
-                  <tr><td>Logistic regression on presence</td><td>0.6852</td><td>0.550</td><td>0.570</td><td>—</td></tr>
-                  <tr><td>Previous unmasked checkpoint</td><td>0.6671</td><td>0.588</td><td>0.626</td><td>0.009</td></tr>
-                  <tr className="hi"><td>Shipped net (masked, p-full 0.7)</td><td>0.6674</td><td>0.588</td><td>0.625</td><td>0.009</td></tr>
+                  <tr><td>Logistic regression on presence</td><td>0.6841</td><td>0.552</td><td>0.574</td><td>—</td></tr>
+                  <tr><td>Previous unmasked checkpoint</td><td>0.6622</td><td>0.595</td><td>0.636</td><td>0.011</td></tr>
+                  <tr className="hi"><td>Shipped net (masked, p-full 0.7)</td><td>0.6650</td><td>0.590</td><td>0.630</td><td>0.011</td></tr>
                 </tbody>
               </table>
             </div>
-            <p className="note-line">Partial-draft support cost <span className="mono">+0.0003</span> log-loss and{" "}
-              <span className="mono">−0.0009</span> AUC against the previous, unmasked checkpoint scored on the same
+            <p className="note-line">Partial-draft support cost <span className="mono">+0.0028</span> log-loss and{" "}
+              <span className="mono">−0.0062</span> AUC against the previous, unmasked checkpoint scored on the same
               held-out rows. Read that as the going rate for reading half-empty boards, not as a clean ablation:
               the earlier checkpoint was fit to an earlier snapshot of the crawl, so data growth is folded into the
               same delta. A 50/50 masked mixture cost three times as much and bought nothing extra.</p>
@@ -413,7 +413,7 @@ export default function Page() {
               ]}
             >
               <b>ECE</b>{" "}bins predictions by confidence and asks how far each bin&apos;s realised win rate sits
-              from what was promised — 0.009 means the promise is kept to within a percentage point.{" "}
+              from what was promised — 0.011 means the promise is kept to within a percentage point.{" "}
               <b>Edge</b> is not a quality metric at all: it is how much the model is willing to claim, which is
               only meaningful next to an ECE that stays flat.
             </Equation>
@@ -422,7 +422,7 @@ export default function Page() {
               <b>Confidence grows with information; calibration stays put.</b> Bars are the average edge the model
               claims, <Tex>{"|\\hat p - 0.5|"}</Tex>, which roughly triples from a single known pick to a full
               board. The line is expected calibration error, which stays inside a percentage point at every state —
-              0.009 to 0.013, with the one bump at 3v2. A model that got louder as it learned more without staying
+              0.011 to 0.014, with the one bump at 1v1. A model that got louder as it learned more without staying
               honest would climb with the bars.
             </>}><EdgeCalibration /></Fig>
 
@@ -432,21 +432,21 @@ export default function Page() {
                   <caption className="tcap">Per draft state, whole val split masked to each</caption>
                   <thead><tr><th>State</th><th>Log-loss ↓</th><th>AUC ↑</th><th>ECE ↓</th><th>edge</th></tr></thead>
                   <tbody>
-                    <tr><td>1v0</td><td>0.6908</td><td>0.538</td><td>0.010</td><td>0.029</td></tr>
-                    <tr><td>1v1</td><td>0.6870</td><td>0.561</td><td>0.010</td><td>0.044</td></tr>
-                    <tr><td>2v1</td><td>0.6839</td><td>0.576</td><td>0.010</td><td>0.058</td></tr>
-                    <tr><td>2v2</td><td>0.6781</td><td>0.595</td><td>0.010</td><td>0.070</td></tr>
-                    <tr><td>3v2</td><td>0.6742</td><td>0.608</td><td>0.013</td><td>0.082</td></tr>
-                    <tr className="hi"><td>3v3</td><td>0.6674</td><td>0.625</td><td>0.009</td><td>0.093</td></tr>
+                    <tr><td>1v0</td><td>0.6910</td><td>0.538</td><td>0.013</td><td>0.034</td></tr>
+                    <tr><td>1v1</td><td>0.6865</td><td>0.564</td><td>0.014</td><td>0.050</td></tr>
+                    <tr><td>2v1</td><td>0.6828</td><td>0.579</td><td>0.013</td><td>0.064</td></tr>
+                    <tr><td>2v2</td><td>0.6769</td><td>0.599</td><td>0.013</td><td>0.077</td></tr>
+                    <tr><td>3v2</td><td>0.6723</td><td>0.612</td><td>0.011</td><td>0.088</td></tr>
+                    <tr className="hi"><td>3v3</td><td>0.6650</td><td>0.630</td><td>0.011</td><td>0.099</td></tr>
                   </tbody>
                 </table>
               </div>
               <div className="panel panel-2">
                 <div className="kicker">The admission in the middle of the table</div>
                 <p>At <span className="mono">1v0</span> — one pick known, nothing else — the net scores{" "}
-                <b>0.6908</b>. A shrunk per-map win-rate marginal, arithmetic anyone could do in a spreadsheet,
-                scores <b>0.6905</b>.</p>
-                <p>The net loses, by 0.0003. At the lowest-information state it adds nothing beyond the raw
+                <b>0.6910</b>. A shrunk per-map win-rate marginal, arithmetic anyone could do in a spreadsheet,
+                scores <b>0.6906</b>.</p>
+                <p>The net loses, by 0.0004. At the lowest-information state it adds nothing beyond the raw
                 statistic, which the blend already carries separately. It is also not washed out, which is what
                 the masking design was checked against — and the training script prints{" "}
                 <span className="mono">NET LOSES to the empirical marginal</span> if that ever stops being
@@ -617,7 +617,7 @@ logit = S_a - S_b + (pa*qb).sum(1) - (pb*qa).sum(1)`}</pre>
         {/* ============================ 09 LIMITS ============================ */}
         <section id="limits" className="wrap">
           <SecHead n="09" title="What it can't do"
-            lede="A 0.625 AUC is a real edge and a modest one. Most of what decides a ranked match is not in the draft at all." />
+            lede="A 0.630 AUC is a real edge and a modest one. Most of what decides a ranked match is not in the draft at all." />
 
           <div className="grid-2">
             <ul className="clean">
@@ -651,7 +651,7 @@ logit = S_a - S_b + (pa*qb).sum(1) - (pb*qa).sum(1)`}</pre>
             <div className="stack">
               <div className="panel">
                 <div className="kicker">The number that matters most</div>
-                <p className="big-num green">0.009</p>
+                <p className="big-num green">0.011</p>
                 <p>For a tool that <em>consumes</em> probabilities — blending them, ranking with them, projecting
                 ban swings from them — calibration matters more than accuracy. A well-calibrated 0.58-accuracy
                 model is useful. An overconfident 0.62 one is worse than nothing, because every downstream number
@@ -682,7 +682,7 @@ logit = S_a - S_b + (pa*qb).sum(1) - (pb*qa).sum(1)`}</pre>
             </div>
             <div>
               <div className="eyebrow">Standing</div>
-              <p className="dim small">Model retrained 12 Aug 2026 on 1,059,778 matches. Weights last swept
+              <p className="dim small">Model retrained 24 Aug 2026 on 1,615,154 matches. Weights last swept
                 10 Aug 2026 on 995,135. Not affiliated with, endorsed, sponsored or specifically approved by
                 Supercell; built on the public Brawl Stars API (
                 <a href="https://supercell.com/en/fan-content-policy/" target="_blank" rel="noopener noreferrer">Fan
