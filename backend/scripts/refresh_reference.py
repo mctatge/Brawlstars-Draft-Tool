@@ -17,7 +17,8 @@ brawler is added, retrain so it gets a real embedding row, then publish + commit
     PYTHONPATH=backend python backend/scripts/train.py \\
       && PYTHONPATH=backend python backend/scripts/export_model.py \\
       && PYTHONPATH=backend python -m bsdraft.collect.publish --model
-    git add data/reference/brawlers.json data/reference/maps.json && git commit
+    git add data/reference/brawlers.json data/reference/maps.json \\
+      backend/bsdraft/data/class_overrides.json && git commit
 """
 from __future__ import annotations
 
@@ -29,12 +30,15 @@ from typing import Dict, List
 
 import httpx
 
-from bsdraft.constants import RANKED_MODES, REFERENCE_DIR
+from bsdraft.constants import BRAWLER_CLASSES, RANKED_MODES, REFERENCE_DIR
 from bsdraft.data.catalog import (
     CATALOG_HOSTS,
+    apply_catalog,
+    carry_forward_classes,
     diff_catalogs,
     fetch_catalog,
     refresh_accessory_details,
+    resolve_classes_from_notes,
     validate as _validate,
 )
 
@@ -115,6 +119,9 @@ def refresh(brawlers_url: str = BRAWLERS_URL, maps_url: str = MAPS_URL, dry_run:
         else:
             print("  (no existing accessory details changed)")
         return False
+    # Upstream class.name is playstyle text now; written raw it would unclassify nearly every
+    # brawler. Keep committed classes and tag new brawlers Unknown (see carry_forward_classes).
+    repairs = carry_forward_classes(before_list, b_payload)
     m_payload = _fetch_list(maps_url, "maps")
     after_list = _validate(b_payload, "brawlers")
     after_b = _brawler_names(after_list)
@@ -125,11 +132,25 @@ def refresh(brawlers_url: str = BRAWLERS_URL, maps_url: str = MAPS_URL, dry_run:
     new_maps = sorted(after_m[i] for i in after_m if i not in before_m)
     # Star power / gadget changes matter to mastery + loadout scoring but used to pass silently:
     # this script only ever diffed brawler and map *names*.
-    acc_changes = diff_catalogs(before_list, after_list).accessory_changes
+    diff = diff_catalogs(before_list, after_list)
+    acc_changes = diff.accessory_changes
+    # Same class bridge as the catalog watcher: the release notes name a new brawler's class.
+    unknown = [c.name for c in diff.new_brawlers
+               if not (c.detail or "").endswith(tuple(BRAWLER_CLASSES))]
+    class_overrides = resolve_classes_from_notes(unknown)
+    renames = [(c.old_value, c.new_value) for c in diff.brawler_changes if c.change == "renamed"]
 
     print(f"brawlers: {len(before_b)} -> {len(after_b)}")
     if new_brawlers:
         print("  NEW: " + ", ".join(new_brawlers))
+    for name in unknown:
+        print(f"  class for {name}: "
+              f"{class_overrides.get(name) or 'not in the release notes (see class_overrides.json)'}")
+    class_changes = [c for c in diff.brawler_changes if c.change == "class"]
+    for c in class_changes:
+        print(f"  class change: {c.name} — {c.detail}")
+    for note in repairs:
+        print(f"  repaired: {note}")
     if gone_brawlers:
         print("  removed: " + ", ".join(gone_brawlers))
     if acc_changes:
@@ -140,21 +161,22 @@ def refresh(brawlers_url: str = BRAWLERS_URL, maps_url: str = MAPS_URL, dry_run:
     print(f"ranked maps: {len(before_m)} -> {len(after_m)}")
     if new_maps:
         print("  NEW: " + ", ".join(new_maps))
-    if not (new_brawlers or gone_brawlers or new_maps or acc_changes):
+    if not (new_brawlers or gone_brawlers or new_maps or acc_changes or class_changes):
         print("  (no changes vs local snapshots)")
 
     if dry_run:
         print("\n--dry-run: no files written.")
         return bool(new_brawlers)
 
-    _write_atomic(b_path, b_payload)
+    written = apply_catalog(b_payload, class_overrides, renames)  # brawlers.json + overrides
     _write_atomic(m_path, m_payload)
-    print(f"\nwrote {b_path}\n      {m_path}")
+    print("\nwrote " + "\n      ".join(str(p) for p in written + [m_path]))
     if new_brawlers:
         print("\nNew brawler(s) — they encode to index 0 until you retrain. Roll out:")
         print("  python backend/scripts/train.py && python backend/scripts/export_model.py \\")
         print("    && python -m bsdraft.collect.publish --model")
-        print("  git add data/reference/*.json && git commit")
+        print("  git add data/reference/*.json backend/bsdraft/data/class_overrides.json"
+              " && git commit")
     return bool(new_brawlers)
 
 

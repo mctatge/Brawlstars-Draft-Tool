@@ -100,8 +100,12 @@ def class_overrides() -> dict:
 
 
 def _resolve_class(raw_brawler: dict, overrides: dict) -> str:
+    # Anything upstream that isn't a class name ("Unknown", missing, or the playstyle text the
+    # catalog has served in ``class.name`` since 2026-09) defers to the override. The catalog
+    # watcher keeps committed classes out of harm's way (catalog.carry_forward_classes); this
+    # just stops a raw write from also stranding the override-backed brawlers.
     cls = (raw_brawler.get("class") or {}).get("name")
-    if not cls or cls == "Unknown":
+    if cls not in BRAWLER_CLASSES:
         cls = overrides.get(raw_brawler["name"], UNCLASSIFIED)
     return cls if cls in BRAWLER_CLASSES else UNCLASSIFIED
 

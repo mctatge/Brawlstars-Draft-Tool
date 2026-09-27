@@ -193,6 +193,132 @@ def test_mass_edit_burst_requires_review():
     assert any("edits to existing brawlers" in r for r in d.destructive)
 
 
+# --- upstream schema drift: class.name became playstyle text ---------------------
+
+def _drifted(items, texts=None):
+    """Deep-copied ``items`` with every class replaced the way the live catalog serves it since
+    2026-09: playstyle prose in ``class.name`` and a per-brawler ``class.id``."""
+    out = json.loads(json.dumps(items))
+    for i, b in enumerate(out):
+        b["class"] = {"id": 100 + i, "name": (texts or {}).get(b["name"], f"Play {b['name']} Well.")}
+    return out
+
+
+def test_carry_forward_keeps_every_committed_class_and_tags_new_brawlers_unknown():
+    before = BASE + [brawler(3, "Nori", cls="Unknown")]          # override-backed in real data
+    live = {"list": _drifted(before + [brawler(4, "Cosmo"), brawler(5, "Vince")],
+                             {"Cosmo": "Use Gravity To Target Enemies"})}
+    notes = C.carry_forward_classes(before, live)
+    classes = {b["name"]: b["class"] for b in live["list"]}
+    assert classes["Shelly"] == {"name": "Tank"} and classes["Colt"] == {"name": "Marksman"}
+    assert classes["Nori"] == {"name": "Unknown"}                # kept, not the drift text
+    assert classes["Cosmo"] == classes["Vince"] == C.UNKNOWN_CLASS
+    assert "3 brawler(s)" in notes[0]
+    assert any("Cosmo" in n and "Use Gravity" in n for n in notes)
+    d = C.diff_catalogs(before, live["list"])
+    assert [c.change for c in d.brawler_changes] == ["added", "added"]
+    assert [c.detail for c in d.new_brawlers] == ["Rare / Unknown"] * 2  # main() asks the notes
+    assert d.safe_to_automerge and not d.destructive
+
+
+def test_undrifted_diff_of_the_same_payload_would_be_destructive():
+    # Pins why the repair is needed: diffed raw, the drift reads as a mass reclassification.
+    before = BASE + [brawler(3, "Nori", cls="Unknown")] + [brawler(10 + i, f"B{i}") for i in range(4)]
+    d = C.diff_catalogs(before, _drifted(before))
+    assert len(d._b("class")) == len(before) and not d.safe_to_automerge
+
+
+def test_carry_forward_trusts_a_real_reclassification():
+    live = {"list": [brawler(1, "Shelly", cls="Assassin", sp=[(101, "Shell Shock")],
+                             gadgets=[(201, "Fast Forward")]), BASE[1]]}
+    assert C.carry_forward_classes(BASE, live) == []
+    d = C.diff_catalogs(BASE, live["list"])
+    assert [(c.change, c.detail) for c in d.brawler_changes] == [("class", "Tank -> Assassin")]
+
+
+def test_carry_forward_keeps_a_class_upstream_dropped():
+    live = {"list": json.loads(json.dumps(BASE))}
+    live["list"][0]["class"] = {"id": 0, "name": "Unknown"}
+    del live["list"][1]["class"]
+    C.carry_forward_classes(BASE, live)
+    assert not C.diff_catalogs(BASE, live["list"]).changed
+
+
+def test_carry_forward_on_the_real_snapshot_changes_no_resolved_class():
+    # Against the committed catalog: a fully drifted payload plus two new brawlers must resolve
+    # every existing brawler exactly as today and add only the new ones.
+    before = C.load_snapshot(R.REFERENCE_DIR / "brawlers.json")
+    new = [brawler(99000001, "Newcomer A", rarity="Mythic"),
+           brawler(99000002, "Newcomer B", rarity="Mythic")]
+    live = {"list": _drifted(before + new)}
+    C.carry_forward_classes(before, live)
+    ov = R.class_overrides()
+    was = {b["id"]: R._resolve_class(b, ov) for b in before}
+    now = {b["id"]: R._resolve_class(b, ov) for b in live["list"]}
+    assert all(now[i] == was[i] for i in was)
+    assert R.UNCLASSIFIED not in was.values()                    # the snapshot is fully classified
+    d = C.diff_catalogs(before, live["list"])
+    assert [c.name for c in d.brawler_changes] == ["Newcomer A", "Newcomer B"]
+    assert d.safe_to_automerge
+
+
+def test_resolve_class_defers_playstyle_text_to_the_override():
+    raw = {"name": "Nori", "class": {"id": 104, "name": "Jump Around The Map And Cause Chaos"}}
+    assert R._resolve_class(raw, {"Nori": "Assassin"}) == "Assassin"
+    assert R._resolve_class(raw, {}) == R.UNCLASSIFIED
+    assert R._resolve_class({"name": "Colt", "class": {"name": "Marksman"}},
+                            {"Colt": "Tank"}) == "Marksman"      # a real class still wins
+
+
+def test_diff_against_snapshot_repairs_before_diffing():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        (tmp / "brawlers.json").write_text(json.dumps({"list": BASE}), encoding="utf-8")
+        live = {"list": _drifted(BASE + [brawler(3, "Cosmo")])}
+        prev_dir, prev_fetch = C.REFERENCE_DIR, C.fetch_catalog
+        C.REFERENCE_DIR, C.fetch_catalog = tmp, lambda path, hosts: (live, "https://x/v1/brawlers")
+        try:
+            d, payload, _url = C.diff_against_snapshot()
+        finally:
+            C.REFERENCE_DIR, C.fetch_catalog = prev_dir, prev_fetch
+    assert payload is live and payload["list"][0]["class"] == {"name": "Tank"}
+    assert [c.name for c in d.brawler_changes] == ["Cosmo"] and d.safe_to_automerge
+    assert d.repairs and "kept the committed class for 2" in d.repairs[0]
+    assert "repaired:" in d.summary()
+    _title, body = C.render_pr(d, "https://x/v1/brawlers", unclassified=["Cosmo"])
+    assert "Upstream payload repairs" in body and "Still unclassified" in body
+
+
+def test_refresh_reference_writes_carried_classes_and_note_overrides():
+    # scripts/refresh_reference.py used to write the brawler payload raw — the same class wipe.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "refresh_reference_under_test",
+        Path(__file__).resolve().parents[1] / "scripts" / "refresh_reference.py")
+    rr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rr)
+    live_b = {"list": _drifted(BASE + [brawler(3, "Cosmo")])}
+    live_m = {"list": [{"id": 1, "name": "Hard Rock Mine", "gameMode": {"name": "Gem Grab"}}]}
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        (tmp / "brawlers.json").write_text(json.dumps({"list": BASE}), encoding="utf-8")
+        ov_path, restore = _isolated(tmp, {"Kaze": "Assassin"})
+        rr.REFERENCE_DIR = tmp
+        rr._fetch_list = lambda url, path: live_b if path == "brawlers" else live_m
+        rr.resolve_classes_from_notes = lambda names: {n: "Controller" for n in names}
+        try:
+            assert rr.refresh() is True
+        finally:
+            restore()
+        written = {b["name"]: b["class"] for b in
+                   json.loads((tmp / "brawlers.json").read_text(encoding="utf-8"))["list"]}
+        ov = json.loads(ov_path.read_text(encoding="utf-8"))["overrides"]
+        assert (tmp / "maps.json").exists()
+    assert written == {"Shelly": {"name": "Tank"}, "Colt": {"name": "Marksman"},
+                       "Cosmo": C.UNKNOWN_CLASS}
+    assert ov == {"Kaze": "Assassin", "Cosmo": "Controller"}
+
+
 # --- apply_catalog side effects --------------------------------------------------
 
 def _isolated(tmp: Path, overrides: dict):

@@ -30,6 +30,7 @@ Stdlib + httpx only (no torch/pandas), so it is safe on every dependency tier.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -81,6 +82,9 @@ class CatalogDiff:
     n_after: int
     brawler_changes: List[BrawlerChange] = field(default_factory=list)
     accessory_changes: List[AccessoryChange] = field(default_factory=list)
+    # Repairs applied to the live payload before it was diffed (see carry_forward_classes).
+    # Informational only: they never count as changes and never gate a merge.
+    repairs: List[str] = field(default_factory=list)
 
     # --- convenience views -------------------------------------------------
     def _b(self, kind: str) -> List[BrawlerChange]:
@@ -136,7 +140,8 @@ class CatalogDiff:
 
     def summary(self) -> str:
         if not self.changed:
-            return f"catalog unchanged ({self.n_after} brawlers) — snapshot is current"
+            return "\n".join([f"catalog unchanged ({self.n_after} brawlers) — snapshot is current"]
+                             + [f"  repaired: {note}" for note in self.repairs])
         lines = [f"catalog changed: {self.n_before} -> {self.n_after} brawlers"]
         for label, items in (
             ("NEW brawler(s)", self.new_brawlers),
@@ -155,6 +160,8 @@ class CatalogDiff:
                 lines.append(f"  {c.kind} description updated: {c.brawler} — {c.name}")
             else:
                 lines.append(f"  {c.kind} {c.change}: {c.brawler} — {c.name}")
+        for note in self.repairs:
+            lines.append(f"  repaired: {note}")
         if self.destructive:
             lines.append("  ⚠ DESTRUCTIVE — needs review: " + "; ".join(self.destructive))
         return "\n".join(lines)
@@ -221,6 +228,48 @@ def dedupe_accessories(payload: dict, label: str = "brawlers") -> List[str]:
                     notes.append(f"stripped {kind} {a.get('name', '?')!r} (#{aid}) from "
                                  f"{b.get('name', '?')} — description names "
                                  f"{owner.get('name', '?')}")
+    return notes
+
+
+UNKNOWN_CLASS = {"id": 0, "name": "Unknown"}  # the catalog's own tag for "not classified yet"
+
+
+def carry_forward_classes(before: List[dict], payload: dict) -> List[str]:
+    """Keep the committed class wherever the live payload's ``class.name`` is not a real class,
+    in place. Returns notes of what was replaced, for the caller to log / render.
+
+    Upstream changed schema in September 2026 (seen 2026-09-26): ``class.name`` now carries
+    per-brawler playstyle text ("Counter Tanks And Assassins With Burst Damage.") and ``class.id``
+    became a per-brawler number, so neither field names a class any more. Written raw, that payload
+    makes :func:`bsdraft.data.reference._resolve_class` drop nearly every brawler to
+    UNCLASSIFIED — silently breaking class synergy in the model, roles and composition logic.
+
+    So only a value in ``BRAWLER_CLASSES`` is trusted (a genuine reclassification still shows up
+    in the diff). Anything else — playstyle text, ``Unknown``, empty, missing — keeps the snapshot's
+    class object verbatim for a brawler the snapshot already has, and becomes the catalog's own
+    ``Unknown`` tag for a brand-new one, which :func:`resolve_classes_from_notes` and
+    ``class_overrides.json`` then fill. Either way a refresh can add brawlers without touching an
+    existing class."""
+    known = {b["id"]: b for b in before if isinstance(b, dict) and isinstance(b.get("id"), int)}
+    carried: List[str] = []
+    notes: List[str] = []
+    for b in payload.get("list") or []:
+        if not isinstance(b, dict) or _class_of(b) in BRAWLER_CLASSES:
+            continue
+        upstream = _class_of(b)
+        prev = known.get(b.get("id"))
+        if prev is not None:
+            b["class"] = copy.deepcopy(prev.get("class") or UNKNOWN_CLASS)
+            if upstream != _class_of(b):
+                carried.append(upstream)
+        else:
+            b["class"] = dict(UNKNOWN_CLASS)
+            if upstream and upstream != UNKNOWN_CLASS["name"]:
+                notes.append(f"new brawler {b.get('name', '?')} (#{b.get('id')}): upstream class "
+                             f"{upstream!r} is not a class — tagged Unknown")
+    if carried:
+        notes.insert(0, f"kept the committed class for {len(carried)} brawler(s) whose upstream "
+                        f"class is not a class (e.g. {carried[0]!r})")
     return notes
 
 
@@ -386,10 +435,15 @@ def diff_against_snapshot(hosts: Iterable[str] = CATALOG_HOSTS
                           ) -> Tuple[CatalogDiff, dict, str]:
     """Fetch the live brawler catalog and diff it against the committed snapshot. Returns
     ``(diff, live_payload, source_url)`` — the payload is handed back so a caller can write it
-    without re-fetching (and thus without risking a different payload than the one diffed)."""
+    without re-fetching (and thus without risking a different payload than the one diffed).
+    Upstream classes that aren't classes are repaired first (:func:`carry_forward_classes`), so
+    both the diff and any write see the repaired payload."""
     payload, url = fetch_catalog("brawlers", hosts)
     before = load_snapshot(REFERENCE_DIR / "brawlers.json")
-    return diff_catalogs(before, payload["list"]), payload, url
+    repairs = carry_forward_classes(before, payload)
+    diff = diff_catalogs(before, payload["list"])
+    diff.repairs = repairs
+    return diff, payload, url
 
 
 # --------------------------------------------------------------------------- apply
@@ -475,8 +529,11 @@ def _today() -> str:
 # --------------------------------------------------------------------------- rendering
 
 def render_pr(diff: CatalogDiff, source_url: str,
-              class_overrides: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
-    """Render ``(title, body_markdown)`` for the catalog-refresh pull request."""
+              class_overrides: Optional[Dict[str, str]] = None,
+              unclassified: Iterable[str] = ()) -> Tuple[str, str]:
+    """Render ``(title, body_markdown)`` for the catalog-refresh pull request. ``unclassified``
+    names new brawlers that neither the catalog, the release notes nor an existing override
+    could classify."""
     new = diff.new_brawlers
     if new:
         title = "Catalog: add " + ", ".join(c.name for c in new)
@@ -506,6 +563,18 @@ def render_pr(diff: CatalogDiff, source_url: str,
                   "`UNCLASSIFIED` and degrade composition reasoning. Classes taken from the "
                   "official release notes:", ""]
         lines += [f"- **{k}** → `{v}`" for k, v in sorted(class_overrides.items())]
+        lines.append("")
+    unclassified = sorted(unclassified)
+    if unclassified:
+        lines += ["## ❔ Still unclassified", "",
+                  "Neither the catalog nor the latest release notes give a class for "
+                  + ", ".join(f"**{n}**" for n in unclassified)
+                  + ". They land as `UNCLASSIFIED` until someone adds them to "
+                    "`backend/bsdraft/data/class_overrides.json`.", ""]
+    if diff.repairs:
+        lines += ["## 🩹 Upstream payload repairs", "",
+                  "Applied before diffing, so they are not changes; no existing class moves:", ""]
+        lines += [f"- {r}" for r in diff.repairs]
         lines.append("")
     if diff.accessory_changes:
         lines += [f"## 🔧 Star power / gadget changes ({len(diff.accessory_changes)})", "",
@@ -568,11 +637,14 @@ def main() -> None:
         raise SystemExit(f"catalog check failed: {e}")
 
     overrides: Dict[str, str] = {}
+    unclassified: List[str] = []
     if diff.changed and (args.write or args.pr_body):
         # Only brawlers the catalog itself couldn't classify need an override from the notes.
         unknown = [c.name for c in diff.new_brawlers
                    if not (c.detail or "").endswith(tuple(BRAWLER_CLASSES))]
         overrides = resolve_classes_from_notes(unknown)
+        from bsdraft.data.reference import class_overrides as committed_overrides
+        unclassified = [n for n in unknown if n not in overrides and n not in committed_overrides()]
 
     if args.write and diff.changed:
         renames = [(c.old_value, c.new_value) for c in diff.brawler_changes
@@ -584,7 +656,7 @@ def main() -> None:
             print(f"wrote {p}", file=sys.stderr)
 
     if args.pr_body:
-        title, body = render_pr(diff, url, overrides)
+        title, body = render_pr(diff, url, overrides, unclassified)
         with open(args.pr_body, "w", encoding="utf-8") as fh:
             fh.write(body)
         print(json.dumps({
@@ -596,6 +668,8 @@ def main() -> None:
             "n_after": diff.n_after,
             "new_brawlers": [c.name for c in diff.new_brawlers],
             "class_overrides": overrides,
+            "unclassified": unclassified,
+            "repairs": diff.repairs,
         }, ensure_ascii=False))
     elif args.json:
         print(json.dumps(_to_dict(diff), ensure_ascii=False))
