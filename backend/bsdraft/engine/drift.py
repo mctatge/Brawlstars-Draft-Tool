@@ -61,6 +61,7 @@ class MetaReport:
     new_brawlers: List[int] = field(default_factory=list)
     shifts: List[BrawlerShift] = field(default_factory=list)
     note: str = ""
+    newest_ts: int = 0   # epoch of the newest labeled match; CI's pipeline-stale check reads it
 
     def summary(self) -> str:
         lines = [
@@ -112,6 +113,7 @@ def load_report(path: Union[str, Path]) -> MetaReport:
         new_brawlers=[int(b) for b in d.get("new_brawlers", [])],
         shifts=[BrawlerShift(**s) for s in d.get("shifts", [])],
         note=str(d.get("note", "")),
+        newest_ts=int(d.get("newest_ts", 0)),
     )
 
 
@@ -252,7 +254,7 @@ def detect_drift(
         shifted=bool(shifts or new_brawlers),
         recent_days=recent_days, prior_days=prior_days,
         n_recent=n_recent, n_prior=n_prior,
-        new_brawlers=new_brawlers, shifts=shifts, note=note,
+        new_brawlers=new_brawlers, shifts=shifts, note=note, newest_ts=tmax,
     )
 
 

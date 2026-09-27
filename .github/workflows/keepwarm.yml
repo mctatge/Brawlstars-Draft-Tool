@@ -25,7 +25,8 @@ name: keep-warm
 #     data/reference/ranked_boosted.json when it changes. Never auto-merges: a rotation swaps the
 #     active set wholesale and the notes carry no dates, so a human confirms which season is live.
 #     A layout drift or an unmatched brawler name files a needs-review issue instead of a bad PR.
-#   * pipeline-stale — once a day, alert if the crawler stopped publishing fresh match data.
+#   * pipeline-stale — every run, alert when the newest collected battle is >6h old (and close
+#     the alert once fresh data returns).
 # Set repo variable RENDER_HEALTH_URL to "<your-render-url>/api/health"
 #   (repo Settings -> Secrets and variables -> Actions -> Variables -> New repository variable).
 # Note: GitHub disables scheduled workflows after 60 days with no repo activity.
@@ -150,21 +151,22 @@ jobs:
           gh issue create --title "$TITLE" --label meta-alert --body-file /tmp/issue-body.md
 
   pipeline-stale:
-    # Only on the daily cron (or a manual run) — not every 10 minutes.
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 13 * * *'
+    # Every run, not just the daily cron: GitHub drops many scheduled runs (09-23..09-25 got
+    # ~8 runs in 28h and no daily one), so a daily-only check missed a 2.7-day outage. The
+    # check is one API call plus a 2 KB download.
     runs-on: ubuntu-latest
     permissions:
       contents: read   # needed to read the data-latest release via the API
       issues: write
     steps:
-      - name: Check data-latest freshness and file an issue if stale
+      - name: Check how old the newest collected battle is; file or close an issue
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          STALE_HOURS: "6"   # normal is ~1-2h: the crawler publishes every ~80 min
         run: |
-          # Fetch the data-latest release from the GitHub REST API and check the age of
-          # matches.jsonl.gz. The REST API is used directly (rather than `gh release view`)
-          # so we control retries and field names are unambiguous (snake_case REST).
+          # The REST API is used directly (rather than `gh release view`) so we control
+          # retries and field names are unambiguous (snake_case REST).
           RELEASE=$(curl -fsS --max-time 30 --retry 2 --retry-all-errors --retry-delay 5 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -173,51 +175,69 @@ jobs:
             exit 0
           }
 
-          ASSET_DATE=$(echo "$RELEASE" | jq -r '.assets[] | select(.name == "matches.jsonl.gz") | .updated_at')
-          if [ -z "$ASSET_DATE" ] || [ "$ASSET_DATE" = "null" ]; then
-            echo "matches.jsonl.gz not found in data-latest release — skipping."
-            exit 0
+          # Prefer the newest battle in the data (meta_report.json's newest_ts): it also
+          # catches a crawler that publishes but only finds old games. Fall back to when
+          # matches.jsonl.gz was last uploaded for a report written before newest_ts existed.
+          NEWEST=0
+          REPORT_URL=$(jq -r '.assets[] | select(.name == "meta_report.json") | .browser_download_url' <<<"$RELEASE")
+          if [ -n "$REPORT_URL" ] && [ "$REPORT_URL" != "null" ]; then
+            NEWEST=$(curl -fsSL --max-time 30 --retry 2 "$REPORT_URL" | jq -r '.newest_ts // 0') || NEWEST=0
           fi
+          if [ "${NEWEST:-0}" -gt 0 ]; then
+            WHAT="the newest collected Ranked battle"
+          else
+            ASSET_DATE=$(jq -r '.assets[] | select(.name == "matches.jsonl.gz") | .updated_at' <<<"$RELEASE")
+            if [ -z "$ASSET_DATE" ] || [ "$ASSET_DATE" = "null" ]; then
+              echo "matches.jsonl.gz not found in data-latest release — skipping."
+              exit 0
+            fi
+            NEWEST=$(date -u -d "$ASSET_DATE" +%s)
+            WHAT="the last matches.jsonl.gz upload"
+          fi
+          AGE_HOURS=$(( ($(date -u +%s) - NEWEST) / 3600 ))
+          SINCE=$(date -u -d "@$NEWEST" +%Y-%m-%dT%H:%MZ)
+          echo "$WHAT: $SINCE ($AGE_HOURS h ago)"
 
-          ASSET_EPOCH=$(date -u -d "$ASSET_DATE" +%s)
-          NOW_EPOCH=$(date -u +%s)
-          AGE_HOURS=$(( (NOW_EPOCH - ASSET_EPOCH) / 3600 ))
-          echo "matches.jsonl.gz last updated: $ASSET_DATE ($AGE_HOURS h ago)"
-
-          if [ "$AGE_HOURS" -lt 48 ]; then
+          OPEN=$(gh issue list --label pipeline-stale --state open --limit 20 --json number --jq '.[].number')
+          if [ "$AGE_HOURS" -lt "$STALE_HOURS" ]; then
             echo "Pipeline is fresh ($AGE_HOURS h) — nothing to report."
+            # Self-resolve: close any open alert so the next outage files a new one.
+            for N in $OPEN; do
+              gh issue close "$N" --comment "Recovered: $WHAT is ${AGE_HOURS}h old ($SINCE)."
+            done
             exit 0
           fi
 
-          # Dedup: skip if an open issue or one filed in the last 3 days exists.
-          # 3-day window keeps alerts actionable without daily spam; closing = acknowledged.
-          CUTOFF=$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          # Dedup: one open alert at a time, and at most one new alert per 12h if it flaps.
+          CUTOFF=$(date -u -d '12 hours ago' +%Y-%m-%dT%H:%M:%SZ)
           RECENT=$(gh issue list --label pipeline-stale --state all --limit 50 --json state,createdAt |
                      jq --arg cutoff "$CUTOFF" \
                        '[.[] | select(.state == "OPEN" or .createdAt >= $cutoff)] | length')
           if [ "${RECENT:-0}" -gt 0 ]; then
-            echo "A pipeline-stale issue is already open or was filed in the last 3 days — skipping."
+            echo "A pipeline-stale issue is already open or was filed in the last 12h — skipping."
             exit 0
           fi
 
-          TITLE="Crawler stale: matches.jsonl.gz is ${AGE_HOURS}h old"
+          TITLE="Crawler stale: no new Ranked data for ${AGE_HOURS}h"
 
           {
-            echo "The \`data-latest\` release asset \`matches.jsonl.gz\` has not been updated in **${AGE_HOURS} hours** (last updated \`$ASSET_DATE\`)."
+            echo "**${AGE_HOURS} hours** since $WHAT (\`$SINCE\`); normal is 1-2h."
             echo
-            echo "Likely cause: the home crawler's Supercell API key 403'd after a home IP change."
+            echo "Likely causes, most common first:"
+            echo "1. The home Mac is asleep or offline (lid closed on battery, no network)."
+            echo "2. The Supercell API key 403s after a home IP change (the watchdog banner says so)."
             echo
             echo "## Checklist"
             echo
+            echo "- [ ] Wake the Mac / plug it in; check \`data/raw/watchdog_status.json\`"
             echo "- [ ] Check \`data/raw/crawl.out.log\` on the home machine for 403 / network errors"
-            echo "- [ ] Regenerate the key at https://developer.brawlstars.com/ for the current home IP"
-            echo "- [ ] Update \`BRAWLSTARS_API_TOKEN\` in \`.env\` and restart the crawler:"
+            echo "- [ ] On a 403: regenerate the key at https://developer.brawlstars.com/ for the current IP,"
+            echo "      update \`BRAWLSTARS_API_TOKEN\` in \`.env\`, and restart the crawler:"
             echo '  ```'
             echo "  launchctl kickstart -k gui/\$(id -u)/com.bsdraft.crawler"
             echo '  ```'
-            echo "- [ ] Confirm the next publish cycle updates \`matches.jsonl.gz\` in \`data-latest\`"
             echo
-            echo "_Close this issue once the pipeline is running again; a new alert fires at most every 3 days while the pipeline remains stale._"
+            echo "_This issue closes itself once fresh data is published again._"
           } > /tmp/stale-body.md
 
           gh label create pipeline-stale --color 0075ca \
