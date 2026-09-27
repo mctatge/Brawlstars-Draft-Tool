@@ -488,11 +488,12 @@ def apply_catalog(payload: dict, class_overrides: Optional[Dict[str, str]] = Non
     """Write the refreshed brawler snapshot (and any class-override updates) in place. Returns
     the paths written. Callers must have validated ``payload`` first — :func:`fetch_catalog` does.
 
-    ``maps.json`` is deliberately NOT written here. Ranked-map indices are positional (encoders
-    builds them from the (mode, name)-sorted list), so inserting one map shifts every later map
-    onto a neighbour's trained embedding row — an in-range, silently-wrong lookup no
-    out-of-vocabulary guard can catch. Refreshing maps is therefore tied to a retrain and stays
-    in ``scripts/refresh_reference.py``, which reports a ranked-map diff for a human."""
+    ``maps.json`` is not written here. Rotation among catalog maps needs no refresh: the vocab is
+    every ranked-mode map whatever upstream's ``disabled`` flag says, and collected Ranked games
+    decide what the board shows (``data/ranked_maps.py``). A brand-new map id still comes from
+    ``scripts/refresh_reference.py``. That is no longer a safety rule — exports pin map id ->
+    row (``scripts/export_model.py``), so a vocab change can't shift a served row — but this
+    watcher has no additive merge policy for maps yet."""
     written: List[Path] = []
     b_path = REFERENCE_DIR / "brawlers.json"
     _write_atomic(b_path, payload)
@@ -602,10 +603,9 @@ def render_pr(diff: CatalogDiff, source_url: str,
     lines += ["---",
               "_Opened by the `catalog-watch` job (`.github/workflows/keepwarm.yml`) from "
               "`bsdraft.data.catalog`. Touches `brawlers.json` + `class_overrides.json` only — "
-              "`maps.json` is not auto-refreshed, because ranked-map indices are positional and "
-              "inserting a map would shift every later map onto a neighbour's trained embedding "
-              "row (run `scripts/refresh_reference.py` alongside a retrain for maps). Retraining "
-              "happens on the home crawler; a new brawler gets a real embedding row then._"]
+              "`maps.json` is not auto-refreshed (map rotation is read from collected games; a "
+              "brand-new map id needs `scripts/refresh_reference.py`). Retraining runs in the "
+              "`retrain-model.yml` Action; a new brawler gets a real embedding row then._"]
     return title, "\n".join(lines)
 
 
@@ -625,7 +625,8 @@ def main() -> None:
     ap.add_argument("--json", action="store_true", help="emit the diff as JSON (for CI)")
     ap.add_argument("--write", action="store_true",
                     help="write the refreshed brawler snapshot and any class-override updates "
-                         "when the catalog changed (maps are left to refresh_reference.py — see "
+                         "when the catalog changed (brand-new maps are left to "
+                         "refresh_reference.py — see "
                          "apply_catalog)")
     ap.add_argument("--pr-body", metavar="PATH", default=None,
                     help="CI mode: write the pull-request Markdown to PATH and print a one-line "

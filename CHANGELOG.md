@@ -4,6 +4,15 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-09-26
+
+- **The map list now follows the live Ranked rotation.** Hot Zone's Quick Travel (in Ranked since
+  09-17) and In The Liminal were missing, and five maps that had left the rotation were still
+  listed. The upstream catalog still flags Quick Travel as retired, and that flag had hidden a
+  live map before (Safe(r) Zone in August). The list now comes from which maps collected Ranked
+  games show being played, including when collection is slow. The model learns any such map at
+  its next retrain; until then it scores the map as an average map.
+
 ## 2026-09-17
 
 - **New About and Contact pages.** [About](https://brawldraft.com/about) says who builds Brawl

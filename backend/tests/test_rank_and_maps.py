@@ -107,7 +107,7 @@ def _engine_with_map_games(map_games, recent=None):
 
 
 def test_reference_offers_only_maps_ranked_actually_rotates(monkeypatch):
-    # The catalog's not-retired set spans every mode's whole map pool; Ranked rotates a handful.
+    # The catalog spans every mode's whole map pool; Ranked rotates a handful.
     # Collected games are the only rotation signal we have.
     all_maps = R.load_ranked_maps()
     played = {m.id: 500 for m in all_maps[:6]}
@@ -295,19 +295,120 @@ def test_recent_and_fallback_modes_coexist_in_one_response(monkeypatch):
     assert served >= {m.id for m in quiet_pool}
 
 
-def test_reference_falls_back_to_the_full_catalog_before_stats_load(monkeypatch):
-    # A cold start has no map_games yet. Showing too many maps beats showing none.
+def test_reference_falls_back_to_the_upstream_enabled_catalog_before_stats_load(monkeypatch):
+    # A cold start has no map_games yet. Showing too many maps beats showing none — but not the
+    # whole vocab, which now includes every map ever in a ranked mode (~440).
     monkeypatch.setattr(M, "_engine", _engine_with_map_games({}))
     served = TestClient(M.app).get("/api/reference").json()["maps"]
-    assert len(served) == len(R.load_ranked_maps())
+    enabled = {m.id for m in R.load_ranked_maps() if not m.catalog_disabled}
+    assert {m["id"] for m in served} == enabled
+    assert len(enabled) < len(R.load_ranked_maps())
 
 
 def test_reference_map_ids_stay_a_subset_of_the_model_vocabulary(monkeypatch):
-    # The filter lives in the endpoint on purpose: load_ranked_maps() also builds the model's
-    # pinned map vocabulary, so narrowing it there would shift embedding rows under the
-    # trained checkpoint. Guard that the served list never grows past that vocabulary.
+    # The filter lives in the endpoint on purpose: load_ranked_maps() is also the model's map
+    # vocabulary. Guard that the served list never grows past that vocabulary.
     all_ids = {m.id for m in R.load_ranked_maps()}
     monkeypatch.setattr(M, "_engine",
                         _engine_with_map_games({m.id: 10 for m in R.load_ranked_maps()[:3]}))
     served = TestClient(M.app).get("/api/reference").json()["maps"]
     assert {m["id"] for m in served} <= all_ids
+
+
+QUICK_TRAVEL = 15000350   # Hot Zone; live in Ranked from 2026-09-17, upstream flags it disabled
+
+
+def _mode_pool(mode):
+    return [m for m in R.load_ranked_maps() if m.mode == mode]
+
+
+def test_load_ranked_maps_keeps_maps_upstream_flags_disabled():
+    # The upstream `disabled` flag hid live Ranked maps three times (Safe(r) Zone, Quick Travel,
+    # Flooded Mine). It is advisory now: the map stays in the vocab, flagged, and data decides.
+    by_id = {m.id: m for m in R.load_ranked_maps()}
+    assert QUICK_TRAVEL in by_id
+    assert by_id[QUICK_TRAVEL].catalog_disabled
+    assert by_id[QUICK_TRAVEL].mode == "Hot Zone"
+
+
+def test_a_live_map_flagged_disabled_upstream_is_served(monkeypatch):
+    # The Quick Travel bug, healthy-crawl version: a trusted window shows it being played, so it
+    # is in the rotation whatever the catalog says.
+    pool = [m for m in _mode_pool("Hot Zone") if not m.catalog_disabled][:4]
+    games = {m.id: 20000 for m in pool}
+    games[QUICK_TRAVEL] = 1500
+    recent = {m.id: 1200 for m in pool}
+    recent[QUICK_TRAVEL] = 1100
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert QUICK_TRAVEL in served
+    assert served >= {m.id for m in pool}
+
+
+def test_a_thin_window_still_admits_a_clearly_played_map(monkeypatch):
+    # The 2026-09-26 artifact: fresh Ranked games fell ~10x, every mode's 3-day leader sat ~130
+    # (under the 500 trust floor), and the cumulative-only fallback hid Quick Travel — 116 games
+    # in the window, 2,023 cumulative against a 27,686 leader (cut: 4,153).
+    pool = [m for m in _mode_pool("Hot Zone") if not m.catalog_disabled][:4]
+    games = {m.id: 27686 for m in pool}
+    games[QUICK_TRAVEL] = 2023
+    recent = {m.id: 127 for m in pool}
+    recent[QUICK_TRAVEL] = 116
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert QUICK_TRAVEL in served
+    assert served >= {m.id for m in pool}
+
+
+def test_a_thin_window_with_signal_prunes_a_map_that_drew_nothing(monkeypatch):
+    # Same artifact, other direction: five maps with cumulative residue above the cut but zero
+    # games in 3 days were still served while every live peer drew ~100+. Once the mode's window
+    # holds 200+ games, a live map expects ~20+; drawing <= 2 means it left.
+    maps = _mode_pool("Heist")
+    live, retired = maps[:4], maps[4]
+    games = {m.id: 20000 for m in live}
+    games[retired.id] = 18000
+    recent = {m.id: 130 for m in live}
+    recent[retired.id] = 1                     # a stray row
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert retired.id not in served
+    assert served >= {m.id for m in live}
+
+
+def test_a_refilling_window_does_not_prune_on_absence(monkeypatch):
+    # Right after an outage the window is nearly empty: a zero there is noise, not departure.
+    # Below RECENT_PRUNE_MIN_MODE_GAMES the mode keeps its whole cumulative list.
+    maps = _mode_pool("Heist")
+    pool = maps[:5]
+    games = {m.id: 2000 for m in pool}
+    recent = {pool[0].id: 40, pool[1].id: 22, pool[2].id: 9, pool[3].id: 4, pool[4].id: 0}
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert served >= {m.id for m in pool}
+
+
+def test_never_played_catalog_maps_are_never_served(monkeypatch):
+    # The vocab is ~440 maps; only ones with collected games may reach the board.
+    maps = _mode_pool("Gem Grab")
+    pool = maps[:3]
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games({m.id: 900 for m in pool}))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert served == {m.id for m in pool}
+
+
+def test_a_rotation_flip_in_a_thin_window_still_prunes_retirees(monkeypatch):
+    # A full rotation flip splits the window between outgoing and incoming maps, halving the
+    # leader (~60 each here) while the mode's total holds. Absence is judged on that total, so
+    # an old retiree with cumulative residue and zero window games stays pruned mid-flip.
+    maps = _mode_pool("Heist")
+    outgoing, incoming, retiree = maps[:4], maps[4:8], maps[8]
+    games = {m.id: 5800 for m in outgoing}
+    games.update({m.id: 500 for m in incoming})
+    games[retiree.id] = 5700
+    recent = {m.id: 62 for m in outgoing}
+    recent.update({m.id: 58 for m in incoming})
+    monkeypatch.setattr(M, "_engine", _engine_with_map_games(games, recent))
+    served = {m["id"] for m in TestClient(M.app).get("/api/reference").json()["maps"]}
+    assert retiree.id not in served
+    assert served >= {m.id for m in incoming}

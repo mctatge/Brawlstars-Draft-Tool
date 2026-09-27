@@ -45,6 +45,30 @@ def _vocab() -> dict:
     }
 
 
+# A map row with fewer training rows than this has barely moved off its N(0, 0.1) init.
+MIN_PINNED_MAP_ROWS = 100
+
+
+def _learned_maps_only(vocab: dict, map_train_rows) -> dict:
+    """Drop map ids whose embedding row training never really learned from the pinned table.
+
+    The map vocab is every catalog map in a ranked mode (~440), most of which never carries a
+    ranked game. Pinning those would serve their random init as if it were a learned map context
+    — and a map that enters the rotation between retrains would read exactly that. Unpinned, it
+    falls to serve.py's appended fallback row, the mean of the pinned (learned) rows. Rows stay
+    where they are in the weight matrix; only the id -> row table shrinks."""
+    ids = vocab["_vocab_map_ids"].tolist()
+    rows = vocab["_vocab_map_rows"].tolist()
+    if len(map_train_rows) != len(ids):
+        raise SystemExit(f"checkpoint map_train_rows has {len(map_train_rows)} entries for "
+                         f"{len(ids)} map ids — retrain")
+    keep = [i for i, n in enumerate(map_train_rows) if n >= MIN_PINNED_MAP_ROWS]
+    return {
+        "_vocab_map_ids": np.array([ids[i] for i in keep], dtype=np.int64),
+        "_vocab_map_rows": np.array([rows[i] for i in keep], dtype=np.int64),
+    }
+
+
 def capability_regressions(prev_cfg: dict, prev_keys: Iterable[str],
                            cfg: dict, new_keys: Iterable[str]) -> List[str]:
     """Capabilities the artifact currently on disk has that this export would silently drop.
@@ -130,6 +154,9 @@ def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False) -> None
                 raise SystemExit(
                     f"reference catalog changed since training ({what} differ) — rerun "
                     f"scripts/train.py against the current reference, then export")
+        counts = trained_vocab.get("map_train_rows")
+        if counts is not None:
+            vocab.update(_learned_maps_only(vocab, counts))
     else:
         # Older checkpoint without pinned ids: counts are the best available check.
         for what, live, trained in (

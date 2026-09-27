@@ -247,8 +247,9 @@ jobs:
           BODY="$RUNNER_TEMP/catalog-pr.md"
           # --write refreshes data/reference/brawlers.json and fills in class_overrides for
           # brand-new brawlers (the catalog tags them "Unknown"; the release notes carry the real
-          # class). maps.json is deliberately NOT auto-written — ranked-map indices are positional,
-          # so inserting a map shifts later maps onto neighbouring trained embedding rows.
+          # class). maps.json is not written here: rotation among catalog maps needs no refresh
+          # (collected Ranked games decide what the board shows, and the vocab is every
+          # ranked-mode map), and a brand-new map id has no additive merge policy here yet.
           # Progress goes to stderr, so stdout is exactly the one-line JSON header. Non-zero exit
           # = every catalog host failed -> skip quietly; the next run retries.
           if ! HEADER=$(PYTHONPATH=backend python -m bsdraft.data.catalog --pr-body "$BODY" --write); then

@@ -138,3 +138,22 @@ def test_a_changed_setting_is_not_a_regression(em):
 def test_zero_and_empty_settings_are_not_treated_as_missing(em):
     """`0` and `""` are falsy but present — only None/absent is a loss."""
     assert em.capability_regressions({"counter_rank": 16}, [], {"counter_rank": 0}, []) == []
+
+
+# --- _learned_maps_only: pin only map rows training actually learned ----------------------
+
+def test_only_learned_map_rows_are_pinned(em):
+    """The map vocab is the whole ranked-mode catalog; a never-played map must fall to serve's
+    mean learned row rather than ship its random init as a map context."""
+    vocab = {"_vocab_map_ids": np.array([10, 11, 12], dtype=np.int64),
+             "_vocab_map_rows": np.array([1, 2, 3], dtype=np.int64)}
+    out = em._learned_maps_only(vocab, [5000, 0, em.MIN_PINNED_MAP_ROWS])
+    assert out["_vocab_map_ids"].tolist() == [10, 12]
+    assert out["_vocab_map_rows"].tolist() == [1, 3]      # rows keep their trained positions
+
+
+def test_misaligned_map_counts_refuse_to_export(em):
+    vocab = {"_vocab_map_ids": np.array([10, 11], dtype=np.int64),
+             "_vocab_map_rows": np.array([1, 2], dtype=np.int64)}
+    with pytest.raises(SystemExit):
+        em._learned_maps_only(vocab, [5000])

@@ -25,6 +25,7 @@ from bsdraft.collect.client import BrawlStarsClient, normalize_tag
 from bsdraft.config import settings
 from bsdraft.constants import RANKED_MODES
 from bsdraft.data import reference as R
+from bsdraft.data.ranked_maps import select_current_ranked_maps
 from bsdraft.data import sync
 from bsdraft.data.dataset import count_matches
 from bsdraft.engine import mastery
@@ -57,27 +58,6 @@ _personal_locks: dict = {} # tag -> Lock; single-flights the per-tag dataset sca
 _personal_locks_guard = threading.Lock()
 _roster_cache: dict = {}   # normalized tag -> (fetched_at, RosterResponse); short TTL spares the live API
 _ROSTER_CACHE_MAX = 256    # hard bound so distinct tags can't grow the cache without limit
-
-# Share of its mode's busiest map that a map must reach to count as "in the current rotation".
-# The observed gap between a live map and a retired one is ~20x, so anything from ~0.1 to ~0.5
-# separates them; 0.15 leans toward keeping a map that is merely quiet.
-MIN_SHARE_OF_MODE_LEADER = 0.15
-
-# The recent-window (rotation-liveness) cut, used for a mode only when its window leader clears
-# the trust floor. A retired map draws exactly ZERO ranked games post-flip (measured 2026-08-25:
-# 1-2 stray rows per map per 6 days), so the share term buys no readmission protection — it only
-# delays a just-added map's appearance while it ramps from zero. 0.02 of a ~5k steady-state
-# leader is ~100 games, a few hours of crawl; the 25-game floor is what actually separates live
-# from stray when the share term rounds low. The trust floor exists because a thin window can't
-# tell live from straggler: right after a >RECENT_WINDOW_DAYS outage the window restarts from
-# empty, and while per-map counts sit in the Poisson noise band (~1-30) a leader-relative cut
-# would prune live maps that a fuller window keeps. Below it the mode falls back to the
-# cumulative cut above — after an outage that's exactly the right guess (the pre-outage
-# rotation). At the floor itself (leader = 500) same-rate live maps sit ~440+, far above both
-# thresholds, so the gate never bites in a healthy window.
-RECENT_MIN_SHARE_OF_MODE_LEADER = 0.02
-RECENT_MIN_GAMES = 25.0
-RECENT_TRUST_MIN_LEADER = 500.0
 
 _rank_cache: dict = {}     # normalized tag -> (fetched_at, RankResponse); short TTL on live rank lookups
 
@@ -457,17 +437,16 @@ def reference():
         S.BrawlerRef(id=b.id, name=b.name, cls=b.cls, rarity=b.rarity, image_url=b.image_url)
         for b in R.pickable_brawlers()
     ]
-    # `load_ranked_maps()` is the catalog's *not-retired* set — every map still in the game's
-    # files across all modes, ~113 of them. Ranked only rotates a handful per mode per season, so
-    # showing the catalog offers map/mode pairs nobody can queue (e.g. "Heist: Pit Stop"), and the
-    # model has nothing to say about them anyway. Collected ranked games are the only rotation
-    # signal we have — a map with none is one we have never seen played. Same idiom as
-    # `engine.py`'s Brawl Ball pick. Falls back to the full list when stats aren't loaded yet, so
-    # a cold start shows too much rather than nothing.
+    # `load_ranked_maps()` is every catalog map in a ranked mode (~440, including ones upstream
+    # flags `disabled` — that flag has hidden live Ranked maps three times). Ranked only rotates a
+    # handful per mode per season, so showing the catalog offers map/mode pairs nobody can queue
+    # (e.g. "Heist: Pit Stop"), and the model has nothing to say about them anyway. Collected
+    # ranked games are the only rotation signal we have — a map with none is one we have never
+    # seen played. Falls back to the upstream-enabled maps when stats aren't loaded yet, so a
+    # cold start shows too much rather than nothing.
     #
-    # Deliberately filtered *here* and not in `load_ranked_maps()`: that function also builds the
-    # model's pinned map vocabulary (`encoders.py`, `export_model.py`), where dropping entries
-    # would shift every embedding row out from under the trained checkpoint.
+    # Deliberately filtered *here* and not in `load_ranked_maps()`: that function is also the
+    # model's map vocabulary, which should hold every map that could ever carry training games.
     #
     # Two signals, per mode. The recent window (`map_games_recent`, last RECENT_WINDOW_DAYS of
     # battle time) is the primary one: a map added mid-season starts filling it immediately and
@@ -476,33 +455,20 @@ def reference():
     # dropped map drains out of it within the window's ~3 days instead of decaying below the
     # cumulative threshold over ~8 weeks. The cumulative share cut is the fallback for when the
     # recent signal is absent (pre-2026-08-25 artifact) or the mode's window is too thin to
-    # trust (post-outage refill — see RECENT_TRUST_MIN_LEADER): the cumulative stats span more
+    # trust (post-outage refill, or a crawl slowdown — see RECENT_TRUST_MIN_LEADER; a thin window
+    # can still admit a clearly-played map and prune a clearly-absent one, see
+    # RECENT_PRUNE_MIN_MODE_GAMES in `data/ranked_maps.py`): the cumulative stats span more
     # history than one rotation, so "any games at all" would readmit retirees' decaying residue —
     # the separation there is per-mode and enormous (2026-08-20: Heist ran four maps at
     # 1954-2026 games with retired Pit Stop on 90). Both cuts are shares of the mode's leader,
     # not absolute counts, so the thresholds ride the crawl's volume instead of needing a retune
     # every time the dataset grows.
-    all_maps = R.load_ranked_maps()
     stats = _engine.stats if _engine else None
-    games = {m.id: (stats.map_games.get(m.id, 0) if stats else 0) for m in all_maps}
-    recent = {m.id: (stats.map_games_recent.get(m.id, 0) if stats else 0) for m in all_maps}
-    by_mode: dict = {}
-    for m in all_maps:  # all_maps is (mode, name)-sorted, so grouping preserves display order
-        by_mode.setdefault(m.mode, []).append(m)
-    played = []
-    for mode_maps in by_mode.values():
-        top_recent = max(recent[m.id] for m in mode_maps)
-        if top_recent >= RECENT_TRUST_MIN_LEADER:
-            thr = max(RECENT_MIN_GAMES, RECENT_MIN_SHARE_OF_MODE_LEADER * top_recent)
-            played.extend(m for m in mode_maps if recent[m.id] >= thr)
-            continue
-        top = max(games[m.id] for m in mode_maps)
-        played.extend(m for m in mode_maps
-                      if games[m.id] >= max(1, MIN_SHARE_OF_MODE_LEADER * top))
+    played = select_current_ranked_maps(R.load_ranked_maps(), stats)
     maps = [
         S.MapRef(id=m.id, name=m.name, mode=m.mode, image_url=m.image_url,
                  games=int(_engine.stats.map_games.get(m.id, 0)) if _engine else 0)
-        for m in (played or all_maps)
+        for m in played
     ]
     brackets = [b for b in BRACKETS if _engine and b in _engine.bracket_stats]
     # Same free/"boosted" set the recommender folds into a roster (hand-maintained list ∪

@@ -393,10 +393,16 @@ def main() -> None:
     # compares these ids to the live reference at export time — identity, not just counts, so
     # a same-size catalog swap between train and export fails loudly instead of silently
     # re-pinning ids onto neighbours' trained rows.
+    map_rows = np.bincount(ds.map_idx[tr_i], minlength=E.num_maps())
     trained_vocab = {
         "brawler_ids": [int(b) for b, _ in sorted(E.brawler_encoder().items(), key=lambda kv: kv[1])],
         "map_ids": [int(m) for m, _ in sorted(E.map_encoder().items(), key=lambda kv: kv[1])],
         "modes": [s for s, _ in sorted(E.mode_encoder().items(), key=lambda kv: kv[1])],
+        # Training rows per map, aligned with map_ids. The vocab is the whole ranked-mode catalog,
+        # most of which never carries a game; export_model.py pins only rows these counts show
+        # were actually learned, so an untrained map serves the mean trained row, not its init.
+        "map_train_rows": [int(map_rows[r]) for _, r in
+                           sorted(E.map_encoder().items(), key=lambda kv: kv[1])],
     }
     torch.save({"state_dict": model.state_dict(), "config": cfg.to_dict(), "vocab": trained_vocab},
                PROCESSED_DIR / "winprob.pt")

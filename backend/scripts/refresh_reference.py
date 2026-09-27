@@ -73,10 +73,11 @@ def _brawler_names(items: List[dict]) -> Dict[int, str]:
 
 
 def _ranked_map_names(items: List[dict]) -> Dict[int, str]:
-    """Active maps in the ranked mode set, id -> 'Name (Mode)' — mirrors reference.load_ranked_maps."""
+    """Maps in the ranked mode set, id -> 'Name (Mode)' — mirrors reference.load_ranked_maps,
+    which ignores upstream's ``disabled`` flag (see its docstring)."""
     out: Dict[int, str] = {}
     for x in items:
-        if not isinstance(x.get("id"), int) or x.get("disabled"):
+        if not isinstance(x.get("id"), int):
             continue
         mode = (x.get("gameMode") or {}).get("name")
         if mode in RANKED_MODES:

@@ -154,6 +154,22 @@ def test_pinned_vocab_maps_ids_to_trained_rows():
         assert not any(k.startswith("_vocab_") for k in m._w)
 
 
+def test_map_fallback_row_is_the_mean_of_pinned_rows_only():
+    """The map vocab is the whole ranked-mode catalog; exports pin only learned rows. Row 0 (the
+    unknown bucket) and never-trained catalog maps keep their init, so averaging them in would
+    pull the "average map" toward zero. Unpinned ids — including in-matrix ones — use the mean
+    of the pinned rows."""
+    with tempfile.TemporaryDirectory() as td:
+        path = _synthetic(Path(td))
+        raw = dict(np.load(path, allow_pickle=False))
+        raw["_vocab_map_ids"] = np.array([900], dtype=np.int64)
+        raw["_vocab_map_rows"] = np.array([2], dtype=np.int64)       # rows 0 and 1 unlearned
+        np.savez(path, **raw)
+        m = S.WinProbModel(path)
+        assert np.allclose(m._w["map_emb.weight"][N_MAP], raw["map_emb.weight"][2], atol=1e-6)
+        assert m._safe(m._map_row(901), "map_emb.weight") == N_MAP  # in-catalog, unpinned
+
+
 def test_missing_pinned_vocab_falls_back_to_encoders():
     with tempfile.TemporaryDirectory() as td:
         enc = _Encoders()

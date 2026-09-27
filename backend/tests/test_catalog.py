@@ -336,7 +336,8 @@ def _isolated(tmp: Path, overrides: dict):
 
 
 def test_apply_never_writes_maps():
-    # Ranked-map indices are positional, so an auto-merged maps.json would shift trained rows.
+    # The brawler watcher has no merge policy for maps; brand-new map ids go through
+    # refresh_reference.py (rotation among catalog maps is read from collected games).
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         _ov, restore = _isolated(tmp, {})

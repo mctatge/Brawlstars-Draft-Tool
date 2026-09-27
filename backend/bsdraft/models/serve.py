@@ -112,6 +112,10 @@ class WinProbModel:
             base = m
             if key in _BRAWLER_MATRICES and self.supports_partial:
                 base = m[: int(self.cfg["mask_row"])]   # the mask row is not a real brawler
+            if key in _MAP_MATRICES and self._map_rows:
+                # Only pinned rows are learned maps: row 0 (unknown bucket) and catalog maps
+                # without games keep their random init and would pull the mean toward zero.
+                base = m[sorted(set(self._map_rows.values()))]
             w[key] = np.vstack([m, base.mean(axis=0, keepdims=True)])
 
     def _build_class_rows(self) -> Optional[np.ndarray]:
@@ -142,6 +146,9 @@ class WinProbModel:
         return E.encode_brawler(brawler_id)
 
     def _map_row(self, map_id) -> int:
+        """Trained row for a map id. A map the export did not pin — newer than the model, or in
+        the catalog but never trained on — returns the sentinel that :meth:`_safe` turns into
+        the mean learned-map row."""
         if self._map_rows:
             return self._map_rows.get(int(map_id), self._vocab.get("map_emb.weight", 0))
         return E.encode_map(map_id)

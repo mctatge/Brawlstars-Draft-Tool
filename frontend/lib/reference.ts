@@ -24,10 +24,14 @@ export const RANKED_MODES = [
 
 export type RankedModeName = (typeof RANKED_MODES)[number];
 
-// Mirrors RANKED_MAP_ENABLE_OVERRIDES in backend/bsdraft/data/reference.py: maps live in
-// ranked whose upstream `disabled` flag lags behind (the upstream feed tracks the casual
-// rotation). Update both together.
-const MAP_ENABLE_OVERRIDES = new Set([15000886]); // Safe(r) Zone (Heist)
+// Guide-page curation only. The draft board no longer reads the upstream `disabled` flag — the
+// backend reads the live rotation from collected Ranked games (backend/bsdraft/data/ranked_maps.py)
+// — but these static pages have no game data at build time, so maps played in Ranked while
+// upstream still flags them disabled are listed here by hand.
+const MAP_ENABLE_OVERRIDES = new Set([
+  15000886, // Safe(r) Zone (Heist) — Ranked through 2026-08-25
+  15000350, // Quick Travel (Hot Zone) — Ranked from 2026-09-17
+]);
 
 export type GuideMap = { name: string; environment: string };
 

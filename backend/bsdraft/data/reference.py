@@ -38,15 +38,6 @@ BUFFIE_SLOTS = ("gadget", "star_power", "hypercharge")
 # unmaintained file goes QUIET rather than asserting a long-expired free set forever.
 _MAX_UNBOUNDED_ROTATION_DAYS = 45
 
-# Maps that are live in the ranked rotation but whose upstream Brawlify/BrawlAPI ``disabled``
-# flag lags behind it (the events feed tracks casual rotation and can miss a ranked-only pool).
-# Force-enabling here — rather than editing ``maps.json`` — keeps the fix from being clobbered
-# the next time ``scripts/refresh_reference.py`` rewrites the snapshot from upstream. The map
-# still only surfaces on the site once the crawler has accumulated its share of games for the
-# mode (see the reference endpoint), so this just lets it back into the pool to be collected.
-#   15000886  Safe(r) Zone (Heist) — confirmed live 2026-08-23; upstream still flags disabled.
-RANKED_MAP_ENABLE_OVERRIDES = frozenset({15000886})
-
 
 @dataclass(frozen=True)
 class Accessory:
@@ -81,6 +72,8 @@ class GameMap:
     mode: str
     environment: str
     image_url: str
+    # The upstream catalog's ``disabled`` flag. Advisory only — see load_ranked_maps().
+    catalog_disabled: bool = False
 
 
 def _load_json(path: Path):
@@ -176,12 +169,21 @@ def brawler_by_name(name: str) -> Optional[Brawler]:
 
 @lru_cache(maxsize=1)
 def load_ranked_maps() -> tuple:
-    """Active maps belonging to the 5 ranked modes, sorted by (mode, name)."""
+    """Every catalog map in a ranked mode, sorted by (mode, name, id) — the model's map vocab.
+
+    Deliberately NOT filtered on the upstream ``disabled`` flag. That flag is not a Ranked signal:
+    it has been wrong for live Ranked maps three times (Safe(r) Zone through 2026-08-25, Quick
+    Travel from 2026-09-17, Flooded Mine in July — each flagged disabled while being played), and
+    the upstream events feed that might replace it is empty. Collected Ranked games are the
+    authority: the reference endpoint picks the live rotation from them
+    (:func:`bsdraft.data.ranked_maps.select_current_ranked_maps`), and training learns a row for
+    every map that has games. Filtering here meant a live map could be neither shown nor learned
+    until someone hand-edited an override. Growing the vocab is safe: exports pin id -> row, so a
+    served model never reads a shifted row (``scripts/export_model.py``, ``models/serve.py``).
+    """
     raw = _load_json(REFERENCE_DIR / "maps.json")["list"]
     maps = []
     for x in raw:
-        if x.get("disabled") and x.get("id") not in RANKED_MAP_ENABLE_OVERRIDES:
-            continue
         mode = (x.get("gameMode") or {}).get("name")
         if mode not in RANKED_MODES:
             continue
@@ -192,9 +194,11 @@ def load_ranked_maps() -> tuple:
                 mode=mode,
                 environment=(x.get("environment") or {}).get("name", ""),
                 image_url=x.get("imageUrl", ""),
+                catalog_disabled=bool(x.get("disabled")),
             )
         )
-    maps.sort(key=lambda m: (m.mode, m.name))
+    # id breaks (mode, name) ties: the full catalog reuses a name across ids (reworked maps).
+    maps.sort(key=lambda m: (m.mode, m.name, m.id))
     return tuple(maps)
 
 
@@ -422,7 +426,8 @@ def summary() -> str:
         lines.append(f"  UNCLASSIFIED ({len(unclassified)}): " + ", ".join(unclassified))
     else:
         lines.append("  UNCLASSIFIED: 0  (all brawlers classified)")
-    lines.append(f"Ranked maps: {len(maps)}")
+    n_flagged = sum(m.catalog_disabled for m in maps)
+    lines.append(f"Ranked maps: {len(maps)}  ({n_flagged} flagged disabled upstream)")
     for mode in RANKED_MODES:
         lines.append(f"  {mode}: {map_counts[mode]}")
     return "\n".join(lines)

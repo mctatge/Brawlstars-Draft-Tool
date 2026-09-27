@@ -24,6 +24,14 @@ window does not launch a retrain every hour. The one manual path left is a **new
 `backend/scripts/refresh_reference.py` + retrain + a commit (the reference JSONs are bundled
 into the repo).
 
+**Ranked map rotation needs no human step** for any map already in `data/reference/maps.json`
+(~440 in the six ranked modes). The upstream `disabled` flag is ignored: it hid live Ranked maps
+three times (Safe(r) Zone, Quick Travel, Flooded Mine). `/api/reference` shows the maps collected
+Ranked games show being played (`data/ranked_maps.py`), and every ranked-mode catalog map is in
+the model vocab, so the next retrain learns a newly live map's row. Until then it scores with the
+mean learned-map row. A brand-new map id, absent from the snapshot, still needs a `maps.json`
+refresh.
+
 Do not put `--retrain-on-shift` back in the launchd crawler unless you explicitly want local
 PyTorch training again; it can consume several GB of RAM. The flag still exists as a manual escape
 hatch, but the always-on daemon should use the remote dispatch path.

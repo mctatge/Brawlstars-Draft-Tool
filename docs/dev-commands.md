@@ -58,9 +58,9 @@ Other scripts under `backend/scripts/`:
   (methodology + results in [model-evaluation.md](model-evaluation.md)).
 - `refresh_reference.py` — re-pull the Brawlify reference JSONs. Use `--accessories-only` to
   refresh existing gadget/star-power descriptions and names without adding brawlers or changing
-  map vocabulary. **Careful:** a full refresh
-  `maps.json` without a retrain silently re-maps trained map embedding rows; brawlers are
-  safe (id-sorted, append-only).
+  map vocabulary. A full refresh changes the map vocab (every ranked-mode map in `maps.json`),
+  so retrain + export against the new snapshot; the served model stays correct meanwhile
+  because exports pin map id → row.
 
 ### Spatial world-model bootstrap
 

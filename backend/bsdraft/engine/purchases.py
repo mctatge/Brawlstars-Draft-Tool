@@ -498,7 +498,14 @@ def recommend_purchases(owned: Dict[int, OwnedState], stats: DraftStats,
     currency and drag in a full climb — stays discoverable below the overall top; the result is
     still one list sorted by ``value_score``."""
     economy = economy if economy is not None else R.load_economy()
-    ranked_maps = list(ranked_maps if ranked_maps is not None else R.load_ranked_maps())
+    if ranked_maps is None:
+        # Only maps with games: the vocab is every ranked-mode catalog map (~440), and a zero-game
+        # map adds nothing to a games-weighted rate while each brawler_rate() lookup on it
+        # inserts a permanent zero entry into the served stats tables (defaultdicts) — +82 MB
+        # across brackets on the 512 MB Render box when this walked the whole vocab.
+        played = _global_table(stats).map_games
+        ranked_maps = [m for m in R.load_ranked_maps() if played.get(m.id, 0) > 0]
+    ranked_maps = list(ranked_maps)
     boosted_ids = frozenset(boosted if boosted is not None else R.load_ranked_boosted())
     floor = resolve_floor(rank_bracket, power_floor, economy)
     brawlers = list(R.load_brawlers())
