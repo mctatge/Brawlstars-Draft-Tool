@@ -2,7 +2,7 @@
 
 export type Brawler = { id: number; name: string; cls: string; rarity: string; image_url: string };
 export type GameMap = { id: number; name: string; mode: string; image_url: string; games: number };
-export type Reference = { brawlers: Brawler[]; maps: GameMap[]; modes: string[]; brackets: string[]; boosted: number[] };
+export type Reference = { brawlers: Brawler[]; maps: GameMap[]; modes: string[]; brackets: string[]; boosted: number[]; seasonal_boosted?: number[] };
 
 export type PickRec = {
   brawler_id: number; name: string; cls: string; score: number; map_winrate: number;

@@ -474,8 +474,11 @@ def reference():
     # Same free/"boosted" set the recommender folds into a roster (hand-maintained list ∪
     # data-derived), so the client's grid (placeable + "free" badge) and the picks agree on what
     # is free — including unannounced mid-season grants the release notes miss.
+    pickable_ids = {b.id for b in brawlers}
+    seasonal_boosted = [bid for bid in R.load_ranked_rotation() if bid in pickable_ids]
     return S.ReferenceResponse(brawlers=brawlers, maps=maps, modes=list(RANKED_MODES),
-                               brackets=brackets, boosted=list(_free_brawler_ids()))
+                               brackets=brackets, boosted=list(_free_brawler_ids()),
+                               seasonal_boosted=seasonal_boosted)
 
 
 def _parse_id_csv(raw: Optional[str], cap: int = 5) -> List[int]:

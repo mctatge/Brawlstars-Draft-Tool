@@ -4,6 +4,12 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## 2026-10-01
+
+- **The draft board names the season's three boosted brawlers.** A compact portrait strip shows
+  Ash, Mortis, and Amber with “Free at Power 11,” using the in-game rotation confirmed October 1.
+  Separate free grants stay out of this seasonal list. The old Trunk/Willow/Kaze rotation is retired.
+
 ## 2026-09-26
 
 - **The map list now follows the live Ranked rotation.** Hot Zone's Quick Travel (in Ranked since

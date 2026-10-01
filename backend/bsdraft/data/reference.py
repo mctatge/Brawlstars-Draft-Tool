@@ -319,6 +319,31 @@ def _active_grants(doc: dict, now: datetime) -> list:
     return out
 
 
+def _brawler_ids_for_names(names) -> tuple:
+    """Resolve names in source order, skipping unknown names and duplicate ids."""
+    ids = []
+    for name in names:
+        b = brawler_by_name(name) if isinstance(name, str) else None
+        if b is not None and b.id not in ids:
+            ids.append(b.id)
+    return tuple(ids)
+
+
+def load_ranked_rotation() -> tuple:
+    """Ids in the current seasonal Ranked rotation, excluding separate free grants.
+
+    Evaluate the UTC boundary on every call, just like :func:`load_ranked_boosted`, so a
+    kept-warm API switches staged seasons and expires stale rotations without restarting.
+    This narrower set labels the season's rotation; the wider free set still governs roster
+    eligibility and scoring.
+    """
+    doc = _ranked_boosted_doc()
+    if doc is None:
+        return ()
+    rotation = _rotation_for_now(doc, _now_utc()) or {}
+    return _brawler_ids_for_names(rotation.get("brawlers", []) or [])
+
+
 def load_ranked_boosted() -> tuple:
     """Brawler ids of the current season's Ranked **free / "boosted" brawlers** — the maxed
     brawlers everyone may use in Ranked regardless of ownership. Read from the committed
@@ -344,12 +369,7 @@ def load_ranked_boosted() -> tuple:
     now = _now_utc()
     rotation = _rotation_for_now(doc, now) or {}
     names = list(rotation.get("brawlers", []) or []) + _active_grants(doc, now)
-    ids = []
-    for name in names:
-        b = brawler_by_name(name) if isinstance(name, str) else None
-        if b is not None and b.id not in ids:
-            ids.append(b.id)
-    return tuple(ids)
+    return _brawler_ids_for_names(names)
 
 
 @lru_cache(maxsize=1)

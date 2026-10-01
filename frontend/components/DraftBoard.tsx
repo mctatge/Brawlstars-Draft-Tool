@@ -859,6 +859,10 @@ export default function DraftBoard() {
     // ensureLoadout/enemiesFor are render-scoped; deps below are exactly the cache-key inputs.
   }, [hoverSlot, our, their, mode, blindPick]);  // eslint-disable-line react-hooks/exhaustive-deps
   const boostedSet = useMemo(() => new Set(ref?.boosted || []), [ref]);
+  // The seasonal trio is separate from grants and inferred free brawlers used for picks.
+  // Older API deployments omit it; never mislabel the broader free set as the season rotation.
+  const seasonBoosted = (ref?.seasonal_boosted || [])
+    .map((id) => byId.get(id)).filter((b): b is Brawler => b != null);
   const personalizeReady = !!roster?.loaded;
   const bracket = rankInfo?.found ? rankInfo.bracket : null;
   const personalTag = rankInfo?.found ? rankInfo.tag : null;
@@ -1379,6 +1383,24 @@ export default function DraftBoard() {
           <button onClick={reset} className="seg px-2.5 py-1.5">RESET</button>
         </div>
       </header>
+
+      {seasonBoosted.length > 0 && (
+        <section aria-label="Boosted brawlers this season"
+          className="panel flex flex-wrap items-center gap-x-6 gap-y-2 px-3 py-2 mb-3">
+          <div className="flex w-full items-baseline justify-between gap-2 sm:block sm:w-auto">
+            <h2 className="mono text-[10px] font-semibold tracking-[0.08em] text-[var(--gold)]">BOOSTED THIS SEASON</h2>
+            <p className="mono text-[10px] text-[var(--muted)] sm:mt-0.5">Free at Power 11</p>
+          </div>
+          <ul className="grid w-full grid-cols-3 gap-3 sm:flex sm:w-auto sm:gap-6">
+            {seasonBoosted.map((b) => (
+              <li key={b.id} className="flex min-w-0 items-center gap-2">
+                <span aria-hidden="true" className="shrink-0"><Avatar b={b} size={28} /></span>
+                <span className="mono text-[12px] font-semibold text-[var(--text)]">{b.name}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <RankWidget tag={tag} setTag={setTag} rankInfo={rankInfo} loading={rankLoading} onCheck={checkRank} onClear={clearTag} />
 

@@ -129,6 +129,18 @@ levelling tail in recent Ranked data. `DraftStats` accumulates that power histog
 already scans every match and ships the detected ids in the stats artifact, so the cloud (which
 loads, never rebuilds) gets it for free. See the memory note *free-brawlers-detectable-from-match-power*.
 
+The draft board's “Boosted this season” strip reads `seasonal_boosted` from `/api/reference`:
+only the current dated rotation, filtered to pickable catalog entries. The existing `boosted`
+field remains the broader availability set used by recommendations (rotation + grants + match
+inference). Do not derive the three-name display from that union. Both fields follow the existing
+UTC expiry/handover rules; older APIs omit the strip until this field arrives.
+
+The October 1 in-game check confirmed **Ash, Mortis, Amber** and matched the published power
+histogram detector. The August release notes say Pierce instead of Amber. The correction and
+verification timestamp are recorded in `data/reference/ranked_boosted.json`; preserve it when
+reviewing boosted-watch PRs. Its 45-day expiry is a fail-safe ceiling from verification, not an
+announced season end. Nori's separate grant is excluded from the seasonal strip.
+
 ## See also
 
 - [MODEL_CARD.md](MODEL_CARD.md) — the win-probability model's math, training, calibration.

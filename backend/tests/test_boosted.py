@@ -262,6 +262,7 @@ def test_reference_loads_active_ids():
 def test_reference_missing_file_returns_empty():
     with _committed_at(None):
         assert R.load_ranked_boosted() == ()
+        assert R.load_ranked_rotation() == ()
 
 
 def test_reference_expired_valid_until_returns_empty():
@@ -526,6 +527,36 @@ def test_write_document_carries_staged_dates_forward():
 def test_reference_skips_unknown_names():
     with _committed_at({"active": {"brawlers": ["Berry", "Zzzznotreal"]}}):
         assert len(R.load_ranked_boosted()) == 1
+
+
+def test_seasonal_rotation_excludes_grants_and_resolves_unique_known_names():
+    doc = {"active": {"brawlers": ["Berry", "Tara", "Berry", "Zzzznotreal", None]},
+           "grants": [{"brawler": "Nori", "since": "2026-08-25"}]}
+    berry, tara, nori = (R.brawler_by_name(n).id for n in ("Berry", "Tara", "Nori"))
+    with _committed_at(doc), _serving_now("2026-08-26T12:00:00Z"):
+        assert R.load_ranked_rotation() == (berry, tara)
+        assert R.load_ranked_boosted() == (berry, tara, nori)
+
+
+def test_seasonal_rotation_handover_and_expiry_with_a_warm_cache():
+    doc = {"valid_until": "2026-08-18",
+           "active": {"brawlers": ["Berry", "Tara", "Meg"]},
+           "upcoming": [{"active_from": "2026-08-19T10:00:00Z",
+                         "valid_until": "2026-08-31",
+                         "brawlers": ["Trunk", "Willow", "Kaze"]}],
+           "grants": [{"brawler": "Nori", "since": "2026-08-01",
+                       "valid_until": "2026-09-30"}]}
+    with _committed_at(doc), _serving_now("2026-08-18T23:59:59Z") as clock:
+        assert R.load_ranked_rotation() == tuple(
+            R.brawler_by_name(n).id for n in ("Berry", "Tara", "Meg"))
+        clock.now = _at("2026-08-19T09:59:59Z")
+        assert R.load_ranked_rotation() == ()  # expired active; successor not started
+        clock.now = _at("2026-08-19T10:00:00Z")
+        assert R.load_ranked_rotation() == tuple(
+            R.brawler_by_name(n).id for n in ("Trunk", "Willow", "Kaze"))
+        clock.now = _at("2026-09-01T00:00:00Z")
+        assert R.load_ranked_rotation() == ()
+        assert R.load_ranked_boosted() == (R.brawler_by_name("Nori").id,)
 
 
 if __name__ == "__main__":
