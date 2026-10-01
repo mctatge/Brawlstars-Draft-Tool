@@ -53,17 +53,22 @@ def iter_matches(path: Optional[Path] = None, contains: Optional[str] = None) ->
                     continue
 
 
-def recent_matches(n: int, path: Optional[Path] = None) -> list:
+def recent_matches(n: int, path: Optional[Path] = None, min_ts: int = 0) -> list:
     """The ``n`` most-recent matches (by ``ts``), loaded with bounded memory via a size-``n``
     min-heap — so the stats build's peak RAM stays flat as the dataset grows past what a small
-    instance (e.g. Render's 512 MB free tier) can hold. ``n <= 0`` loads everything."""
+    instance (e.g. Render's 512 MB free tier) can hold. ``n <= 0`` loads everything. When
+    ``min_ts`` is set, selection happens within that analysis window rather than selecting stale
+    rows first and filtering them after the cap."""
     if not n or n <= 0:
-        return list(iter_matches(path))
+        return [r for r in iter_matches(path)
+                if not min_ts or int(r.get("ts") or 0) >= min_ts]
     import heapq
     from itertools import count
     tie = count()                       # unique tiebreak so dicts are never compared
     heap: list = []                     # (ts, tiebreak, match) — keeps the n largest ts
     for r in iter_matches(path):
+        if min_ts and int(r.get("ts") or 0) < min_ts:
+            continue
         item = (int(r.get("ts") or 0), next(tie), r)
         if len(heap) < n:
             heapq.heappush(heap, item)
@@ -88,10 +93,13 @@ def count_matches(path: Optional[Path] = None) -> int:
     return total
 
 
-def build_dataset(path: Optional[Path] = None, ranked_maps_only: bool = True) -> Dataset:
+def build_dataset(path: Optional[Path] = None, ranked_maps_only: bool = True,
+                  min_ts: int = 0) -> Dataset:
     bidx = E.brawler_encoder()
     a_rows, b_rows, maps, modes, ys, tss, qs = [], [], [], [], [], [], []
     for r in iter_matches(path):
+        if min_ts and int(r.get("ts") or 0) < min_ts:
+            continue
         if r.get("a_won") is None:
             continue
         a_ids = [p["brawler_id"] for p in r["team_a"]]

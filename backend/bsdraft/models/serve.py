@@ -40,6 +40,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 from bsdraft.constants import BRAWLER_CLASSES, MODE_CAMEL_TO_DISPLAY, PROCESSED_DIR, TEAM_SIZE
+from bsdraft.data.balance_eras import current_balance_era
 from bsdraft.data import encoders as E
 
 DEFAULT_PATH = PROCESSED_DIR / "winprob.npz"
@@ -58,10 +59,12 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 
 
 class WinProbModel:
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Optional[Path] = None, *, validate_current_era: bool = False):
         self.path = Path(path) if path else DEFAULT_PATH
         self.cfg: Optional[dict] = None
         self._w: Optional[Dict[str, np.ndarray]] = None
+        self.analysis_era_id: str = ""
+        self.analysis_start_ts: int = 0
         # Vocabulary sizes this export was trained with (before the fallback row is appended).
         self._vocab: Dict[str, int] = {}
         self._warned = False
@@ -75,9 +78,26 @@ class WinProbModel:
         self._class_rows: Optional[np.ndarray] = None
         if self.path.exists():
             data = np.load(self.path, allow_pickle=False)
+            if "_analysis" in data.files:
+                try:
+                    analysis = json.loads(data["_analysis"].item())
+                    self.analysis_era_id = str(analysis.get("era_id") or "")
+                    self.analysis_start_ts = int(analysis.get("start_ts") or 0)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    logger.warning("ignoring malformed analysis provenance in %s", self.path)
+            if validate_current_era:
+                era = current_balance_era()
+                if era and (self.analysis_start_ts != era.start_ts or
+                            self.analysis_era_id != era.id):
+                    logger.warning(
+                        "model artifact %s is for era %s / %s, current era is %s / %s; "
+                        "serving empirical stats only until the model is retrained",
+                        self.path.name, self.analysis_era_id or "legacy",
+                        self.analysis_start_ts, era.id, era.start_ts)
+                    return
             self.cfg = json.loads(data["_config"].item())
             self._w = {k: data[k].astype(np.float32) for k in data.files
-                       if k != "_config" and not k.startswith("_vocab_")}
+                       if k not in ("_config", "_analysis") and not k.startswith("_vocab_")}
             self._load_vocab(data)
             self._add_fallback_rows()
             self._class_rows = self._build_class_rows()

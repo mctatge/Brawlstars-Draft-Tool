@@ -1,10 +1,9 @@
 """Serialize built ``DraftStats`` to a compact artifact and load it back.
 
-Lets the deployed API **load** precomputed empirical stats instead of **rebuilding** them in
-memory from the full match dataset — which OOMs a small instance (Render's 512 MB free tier)
-once the crawler grows the data past ~110k matches. The home machine (with RAM to spare) builds
-the full stats and publishes ``stats.json.gz``; the API syncs and loads it in tens of MB, with
-the match data never resident. Mirrors the model's ``winprob.npz`` publish/load split.
+Lets the deployed API **load** precomputed current-balance-era empirical stats instead of
+replaying the match history at boot. The home machine publishes ``stats.json.gz``; the API syncs
+and loads it in tens of MB, with the match data never resident. Era provenance is serialized so
+an old all-era artifact cannot be mistaken for a live one. Mirrors the model's publish/load split.
 
 Format: gzipped JSON. The ``DraftStats`` tables are sparse dicts keyed by ints / int-pairs /
 brawler-pairs, which JSON's string keys fit more naturally than a numeric array archive.
@@ -19,7 +18,7 @@ from typing import Dict, Tuple
 
 from bsdraft.engine.stats import DraftStats
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 _DICTS_1 = ("b_games", "b_wins", "map_games")                # int key
 # Int-keyed tables absent from artifacts published before they existed: the loader defaults
 # them empty instead of raising, so an old artifact stays loadable (empty just means "no
@@ -36,7 +35,13 @@ def _pair(k: str) -> Tuple[int, int]:
 
 
 def _table_to_dict(s: DraftStats) -> dict:
-    out: dict = {"n": s.n, "halflife_days": s.halflife_days, "bracket": s.bracket}
+    out: dict = {
+        "n": s.n,
+        "halflife_days": s.halflife_days,
+        "bracket": s.bracket,
+        "analysis_start_ts": getattr(s, "analysis_start_ts", 0),
+        "analysis_era_id": getattr(s, "analysis_era_id", ""),
+    }
     for name in _DICTS_1 + _DICTS_1_OPT:
         out[name] = {str(k): round(v, 6) for k, v in getattr(s, name).items()}
     for name in _DICTS_2:
@@ -51,7 +56,14 @@ def _table_to_dict(s: DraftStats) -> dict:
 
 def _dict_to_table(d: dict, fallback=None) -> DraftStats:
     # Build a blank DraftStats (empty matches -> no build work), then fill its tables.
-    s = DraftStats(matches=[], halflife_days=d["halflife_days"], bracket=d.get("bracket"), fallback=fallback)
+    s = DraftStats(
+        matches=[],
+        halflife_days=d["halflife_days"],
+        bracket=d.get("bracket"),
+        fallback=fallback,
+        analysis_start_ts=int(d.get("analysis_start_ts") or 0),
+        analysis_era_id=str(d.get("analysis_era_id") or ""),
+    )
     s.n = d["n"]
     for name in _DICTS_1:
         setattr(s, name, defaultdict(float, {int(k): v for k, v in d[name].items()}))
@@ -75,13 +87,21 @@ def _dict_to_table(d: dict, fallback=None) -> DraftStats:
 def stats_payload(global_stats: DraftStats, brackets: Dict[str, DraftStats]) -> dict:
     return {
         "version": FORMAT_VERSION,
+        "analysis_start_ts": getattr(global_stats, "analysis_start_ts", 0),
+        "analysis_era_id": getattr(global_stats, "analysis_era_id", ""),
         "global": _table_to_dict(global_stats),
         "brackets": {name: _table_to_dict(s) for name, s in brackets.items()},
     }
 
 
 def load_payload(payload: dict) -> Tuple[DraftStats, Dict[str, DraftStats]]:
-    g = _dict_to_table(payload["global"])
+    global_dict = dict(payload["global"])
+    # Accept artifacts written during the metadata transition where provenance lived only at
+    # payload level. Truly old artifacts remain identifiable as all-era (0 / "") and are
+    # rejected by the live API when a current era is configured.
+    global_dict.setdefault("analysis_start_ts", payload.get("analysis_start_ts", 0))
+    global_dict.setdefault("analysis_era_id", payload.get("analysis_era_id", ""))
+    g = _dict_to_table(global_dict)
     br = {name: _dict_to_table(d, fallback=g) for name, d in payload.get("brackets", {}).items()}
     return g, br
 

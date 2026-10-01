@@ -24,6 +24,7 @@ from bsdraft.api import schemas as S
 from bsdraft.collect.client import BrawlStarsClient, normalize_tag
 from bsdraft.config import settings
 from bsdraft.constants import RANKED_MODES
+from bsdraft.data.balance_eras import current_balance_era
 from bsdraft.data import reference as R
 from bsdraft.data.ranked_maps import select_current_ranked_maps
 from bsdraft.data import sync
@@ -47,7 +48,7 @@ logger = logging.getLogger("bsdraft.api")
 
 _engine: Optional[DraftEngine] = None
 _dataset_count: int = 0    # total matches in the synced dataset (headline count; recomputed on sync change)
-_stats_source: str = ""    # "artifact" (full-dataset stats loaded) or "rebuild" (capped fallback)
+_stats_source: str = ""    # "artifact" (current-era stats loaded) or "rebuild" (capped fallback)
 _last_check: float = 0.0   # epoch of the last sync attempt (liveness)
 _last_change: float = 0.0  # epoch of the last actual data change
 _meta_cache = None         # (data_version, MetaReport); recomputed lazily when data changes
@@ -64,22 +65,34 @@ _rank_cache: dict = {}     # normalized tag -> (fetched_at, RankResponse); short
 
 def _build_stats():
     """Produce ``(global_stats, {bracket: stats})``. When STATS_URL is set the API **loads** the
-    precomputed stats artifact (built off-box from *all* matches, ~tens of MB, no OOM); otherwise
-    it **rebuilds** them from the synced matches, capped to STATS_MAX_MATCHES to bound peak RAM.
+    precomputed current-era stats artifact (built off-box, ~tens of MB, no OOM); otherwise it
+    **rebuilds** them from the synced matches, capped to STATS_MAX_MATCHES within the current era.
     Which path won is surfaced on /api/health as ``stats_source`` — the fallback is a graceful
-    degradation (a 60k window instead of the full dataset), and a malformed artifact once left it
-    serving silently for weeks."""
+    degradation (a current-era window instead of the full archive)."""
     global _stats_source
+    era = current_balance_era()
     if settings.stats_url and sync.STATS_PATH.exists():
         try:
             result = load_stats(sync.STATS_PATH)
+            if era and (
+                getattr(result[0], "analysis_start_ts", 0) != era.start_ts
+                or getattr(result[0], "analysis_era_id", "") != era.id
+            ):
+                raise ValueError(
+                    f"stats artifact is for era {getattr(result[0], 'analysis_era_id', '') or 'legacy'}"
+                    f" / {getattr(result[0], 'analysis_start_ts', 0)}, expected {era.id} / {era.start_ts}"
+                )
             _stats_source = "artifact"
             return result
         except Exception as e:  # noqa: BLE001 — a corrupt/old artifact must not break startup
             logger.warning("stats load failed (%s); rebuilding from matches", e)
     _stats_source = "rebuild"
-    return build_bracketed(halflife_days=settings.stats_halflife_days,
-                           max_matches=settings.stats_max_matches)
+    return build_bracketed(
+        halflife_days=settings.stats_halflife_days,
+        max_matches=settings.stats_max_matches,
+        analysis_start_ts=era.start_ts if era else 0,
+        analysis_era_id=era.id if era else "",
+    )
 
 
 def _rank_index() -> RankIndex:
@@ -195,7 +208,11 @@ def _rebuild_personal(t: str):
         # lands mid-scan we read the pre-refresh file to the end (the open handle keeps the old
         # inode), so stamping the post-scan version would serve those stale stats as current for
         # a whole data epoch. With the start version, the entry is born stale and rebuilt on use.
-        ps = build_personal_stats(t, fallback=_engine.stats)
+        ps = build_personal_stats(
+            t,
+            fallback=_engine.stats,
+            analysis_start_ts=getattr(_engine.stats, "analysis_start_ts", 0),
+        )
         _personal_cache[t] = (version, ps)
         return ps
 
@@ -310,7 +327,9 @@ async def _refresh_loop() -> None:
                 logger.info("draft stats rebuilt: %d matches, %d bracket(s)", g.n, len(br))
             if settings.model_url and _engine is not None:
                 if await loop.run_in_executor(None, sync.sync_model, settings.model_url):
-                    _engine.model = await loop.run_in_executor(None, WinProbModel)  # atomic swap
+                    _engine.model = await loop.run_in_executor(
+                        None, lambda: WinProbModel(validate_current_era=True)
+                    )  # atomic swap
                     logger.info("win-prob model hot-swapped (available=%s)", _engine.model.available)
             # Item win-rate table: just refresh the file — the loadout loader reloads it on mtime
             # change per request, so there's no engine object to hot-swap.
@@ -341,7 +360,7 @@ async def lifespan(app: FastAPI):
     if settings.itemstats_url:
         await loop.run_in_executor(None, sync.sync_itemstats, settings.itemstats_url)
     g, br = _build_stats()
-    _engine = DraftEngine(g, WinProbModel(), bracket_stats=br)
+    _engine = DraftEngine(g, WinProbModel(validate_current_era=True), bracket_stats=br)
     _dataset_count = await loop.run_in_executor(None, count_matches)  # headline count over the full dataset
     if settings.player_tag:
         ptag = normalize_tag(settings.player_tag)
@@ -353,7 +372,11 @@ async def lifespan(app: FastAPI):
                 try:
                     extra = matches_from_battlelog(await client.get_battlelog(ptag), ptag)
                     _personal_cache[ptag] = (_last_change, build_personal_stats(
-                        ptag, fallback=_engine.stats, extra_matches=extra))
+                        ptag,
+                        fallback=_engine.stats,
+                        extra_matches=extra,
+                        analysis_start_ts=getattr(_engine.stats, "analysis_start_ts", 0),
+                    ))
                 except Exception:
                     pass
         except Exception:
@@ -381,12 +404,17 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
 
 @app.get("/api/health")
 def health():
+    era = current_balance_era()
     return {
         "status": "ok",
         "model": bool(_engine and _engine.model and _engine.model.available),
         "matches": _dataset_count or (_engine.stats.n if _engine else 0),
         "stats_source": _stats_source,
         "stats_n": _engine.stats.n if _engine else 0,
+        "stats_era": getattr(_engine.stats, "analysis_era_id", "") if _engine else "",
+        "stats_start_ts": getattr(_engine.stats, "analysis_start_ts", 0) if _engine else 0,
+        "current_era": era.id if era else "",
+        "current_era_start_ts": era.start_ts if era else 0,
         "roster": bool(_engine and _engine.roster),
         "refresh_seconds": settings.refresh_seconds if settings.data_url else 0,
         "last_check": _last_check or None,

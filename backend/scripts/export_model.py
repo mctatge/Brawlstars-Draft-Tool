@@ -186,7 +186,12 @@ def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False) -> None
                 f"--allow-capability-downgrade if the removal is deliberate.")
         print(f"WARNING: exporting a capability downgrade (--allow-capability-downgrade):\n{detail}")
 
-    np.savez(npz_path, _config=np.array(json.dumps(cfg)), **weights, **vocab)
+    # Keep training-window provenance beside the weights. The serving API can refuse to hot-load
+    # an old all-era model after the live balance boundary advances. Older checkpoints have no
+    # metadata and are intentionally treated as legacy.
+    analysis = ckpt.get("analysis", {})
+    np.savez(npz_path, _config=np.array(json.dumps(cfg)),
+             _analysis=np.array(json.dumps(analysis)), **weights, **vocab)
     size_kb = npz_path.stat().st_size / 1024
     print(f"exported {pt_path}  ->  {npz_path}  ({size_kb:.1f} KB, {len(weights)} tensors "
           f"+ pinned vocabulary)")

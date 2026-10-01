@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "current_era": "2026-09-16",
+  "eras": [
+    {
+      "id": "2026-09-16",
+      "label": "September 16, 2026 maintenance balance changes",
+      "effective_from": "2026-09-16T00:00:00Z",
+      "precision": "day",
+      "source_url": "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-august-2026/",
+      "note": "The official notes identify the September 16 maintenance date but not an exact rollout time. The UTC day boundary is a conservative, reviewable cutoff."
+    }
+  ]
+}

@@ -40,9 +40,11 @@ class PersonalStats:
         matches: Iterable[dict],
         fallback: Optional[DraftStats] = None,
         halflife_days: float = DEFAULT_HALFLIFE_DAYS,
+        analysis_start_ts: int = 0,
     ):
         self.tag = normalize_tag(tag)
         self.fallback = fallback     # rates shrink toward this (global/bracket) table
+        self.analysis_start_ts = int(analysis_start_ts or 0)
         self.n = 0                   # de-duplicated matches this player appears in
         self.b_games: dict = defaultdict(float)
         self.b_wins: dict = defaultdict(float)
@@ -57,6 +59,8 @@ class PersonalStats:
         rows: List[dict] = []
         seen: set = set()
         for r in matches:
+            if self.analysis_start_ts and int(r.get("ts") or 0) < self.analysis_start_ts:
+                continue
             if r.get("a_won") is None:
                 continue
             if self.tag not in set(r.get("player_tags") or []):
@@ -161,6 +165,7 @@ def build_personal_stats(
     fallback: Optional[DraftStats] = None,
     extra_matches: Optional[Iterable[dict]] = None,
     halflife_days: float = DEFAULT_HALFLIFE_DAYS,
+    analysis_start_ts: int = 0,
 ) -> Optional[PersonalStats]:
     """Build personal stats for ``tag`` from the synced dataset, optionally augmented with
     freshly-fetched matches (e.g. a live battle log). Returns ``None`` when the player has
@@ -172,8 +177,18 @@ def build_personal_stats(
     # whole dataset — PersonalStats only ever uses matches the tag appears in. The raw-substring
     # prefilter (contains=tag_n) skips json.loads on every line the tag doesn't appear in; the
     # exact membership check then drops the rare line where tag_n is only a substring.
-    rows = [r for r in iter_matches(contains=tag_n) if tag_n in (r.get("player_tags") or ())]
+    rows = [
+        r for r in iter_matches(contains=tag_n)
+        if (not analysis_start_ts or int(r.get("ts") or 0) >= analysis_start_ts)
+        and tag_n in (r.get("player_tags") or ())
+    ]
     if extra_matches:
         rows.extend(extra_matches)
-    ps = PersonalStats(tag_n, rows, fallback=fallback, halflife_days=halflife_days)
+    ps = PersonalStats(
+        tag_n,
+        rows,
+        fallback=fallback,
+        halflife_days=halflife_days,
+        analysis_start_ts=analysis_start_ts,
+    )
     return ps if ps.n > 0 else None

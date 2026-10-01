@@ -115,13 +115,22 @@ def _try_publish() -> None:
 
 
 def _publish_stats() -> None:
-    """Build the full empirical stats and publish stats.json.gz so the live API LOADS them
-    instead of rebuilding from the whole dataset (which OOMs the 512 MB free tier). Best-effort
-    — never kills the crawl loop."""
+    """Build current balance-era stats and publish stats.json.gz for the live API.
+
+    The raw archive remains available for drift detection and research, but live map, matchup,
+    and synergy tables must not mix pre-change rows into the active era. Best-effort — never
+    kills the crawl loop.
+    """
     try:
+        from bsdraft.data.balance_eras import current_balance_era
         from bsdraft.engine.stats import build_bracketed
         from bsdraft.engine.stats_store import save_stats
-        g, br = build_bracketed(halflife_days=settings.stats_halflife_days)  # all matches
+        era = current_balance_era()
+        g, br = build_bracketed(
+            halflife_days=settings.stats_halflife_days,
+            analysis_start_ts=era.start_ts if era else 0,
+            analysis_era_id=era.id if era else "",
+        )
         save_stats(g, br, publisher.STATS_PATH)
         publisher.publish_stats()
     except Exception as e:  # noqa: BLE001 — a stats hiccup shouldn't kill a long crawl loop

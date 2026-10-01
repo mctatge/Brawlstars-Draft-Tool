@@ -34,6 +34,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from bsdraft.constants import PROCESSED_DIR, REPO_ROOT  # noqa: E402
+from bsdraft.data.balance_eras import current_balance_era  # noqa: E402
 from bsdraft.data import dataset as D  # noqa: E402
 from bsdraft.data import encoders as E  # noqa: E402
 from bsdraft.models.winprob import ModelConfig, WinProbNet  # noqa: E402
@@ -176,6 +177,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--halflife-days", type=float, default=30.0)
+    ap.add_argument("--all-eras", action="store_true",
+                    help="explicit research/backtest mode: train on pre-balance history too")
+    ap.add_argument("--min-ts", type=int, default=0,
+                    help="custom inclusive UTC epoch cutoff; mutually exclusive with --all-eras")
     # On by default since 2026-09-03. It was `store_true`, and collect.py's unattended
     # --retrain-on-shift argv never passed it, so every automatic retrain quietly produced a
     # model without the term and published it — the deployed artifact lost the capability for a
@@ -216,14 +221,29 @@ def main() -> None:
 
     if args.candidates < 1:
         raise SystemExit("--candidates must be >= 1")
+    if args.min_ts < 0:
+        raise SystemExit("--min-ts must be >= 0")
+    if args.all_eras and args.min_ts:
+        raise SystemExit("--all-eras and --min-ts are mutually exclusive")
+
+    era = current_balance_era()
+    if args.all_eras:
+        analysis_start_ts, analysis_era_id = 0, ""
+    elif args.min_ts:
+        analysis_start_ts = args.min_ts
+        analysis_era_id = era.id if era and era.start_ts == analysis_start_ts else f"custom:{analysis_start_ts}"
+    elif era:
+        analysis_start_ts, analysis_era_id = era.start_ts, era.id
+    else:
+        analysis_start_ts, analysis_era_id = 0, ""
 
     # Seeds the shared split below (np.random.permutation). Per-candidate weight init and mask
     # draws are seeded inside _train_candidate, so N=1 reproduces the old single-seed run exactly.
     np.random.seed(args.seed)
 
-    ds = D.build_dataset()
+    ds = D.build_dataset(min_ts=analysis_start_ts)
     n = len(ds)
-    print(f"dataset: {D.summary(ds)}")
+    print(f"dataset ({analysis_era_id or 'all eras'}): {D.summary(ds)}")
     if n < 200:
         print("Not enough labeled data yet — let the crawl collect more, then retrain.")
         return
@@ -404,7 +424,12 @@ def main() -> None:
         "map_train_rows": [int(map_rows[r]) for _, r in
                            sorted(E.map_encoder().items(), key=lambda kv: kv[1])],
     }
-    torch.save({"state_dict": model.state_dict(), "config": cfg.to_dict(), "vocab": trained_vocab},
+    torch.save({
+        "state_dict": model.state_dict(),
+        "config": cfg.to_dict(),
+        "vocab": trained_vocab,
+        "analysis": {"era_id": analysis_era_id, "start_ts": analysis_start_ts},
+    },
                PROCESSED_DIR / "winprob.pt")
     DOCS.mkdir(parents=True, exist_ok=True)
     metrics = {
@@ -419,6 +444,7 @@ def main() -> None:
         # when there was no paired baseline, e.g. after a vocabulary change).
         "n_candidates": n_cand,
         "chosen_seed": chosen_seed,
+        "analysis": {"era_id": analysis_era_id, "start_ts": analysis_start_ts},
         "candidates": [{"seed": c["seed"], "logloss": c["m_ll"],
                         "delta": (c["m_ll"] - baseline["logloss"]) if baseline else None}
                        for c in candidates],

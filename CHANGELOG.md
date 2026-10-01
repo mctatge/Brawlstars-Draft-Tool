@@ -6,6 +6,10 @@ retrains, doc edits, and internal refactors are left out unless they changed wha
 
 ## 2026-10-01
 
+- **Live analysis now starts at the active balance boundary.** Map, matchup, synergy, personal,
+  and model training data use the September 16 balance era by default, while the raw archive stays
+  available for drift detection and explicit research/backtests. Stale stats/model artifacts are
+  rejected instead of silently mixing metas.
 - **The draft board names the season's three boosted brawlers.** A compact portrait strip shows
   Ash, Mortis, and Amber with “Free at Power 11,” using the in-game rotation confirmed October 1.
   Separate free grants stay out of this seasonal list. The old Trunk/Willow/Kaze rotation is retired.
