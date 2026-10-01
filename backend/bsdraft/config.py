@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     # it alongside the dataset and hot-swaps the reloaded model in without a restart — so a
     # retrain (e.g. after a balance shift) rolls out live instead of waiting for a redeploy.
     model_url: str = ""
-    # URL of the published precomputed stats (stats.json.gz Release asset). When set, the API
-    # LOADS the empirical stats from it instead of rebuilding them in memory from the full
-    # match dataset — so it uses *all* matches with no 512 MB OOM (the home machine builds +
-    # publishes them; see scripts/export_stats.py). Unset = rebuild locally (capped, below).
+    # URL of the published precomputed current-balance-era stats (stats.json.gz Release asset).
+    # When set, the API LOADS it instead of rebuilding in memory. The home machine builds +
+    # publishes it; see scripts/export_stats.py. An artifact from an older era is rejected.
+    # Unset = rebuild the current era locally (capped, below).
     stats_url: str = ""
     # URL of the published player-rank index (rank_index.npz Release asset; the legacy
     # rank_index.json.gz also loads — the loader dispatches on content). When set, the API only
@@ -76,10 +76,10 @@ class Settings(BaseSettings):
 
     # Engine tuning
     stats_halflife_days: float = 21.0  # recency half-life (days) for empirical stats; <=0 disables decay
-    # Cap the empirical-stats build to the most recent N matches (0 = all). Bounds peak RAM so
-    # the build fits a small instance (e.g. Render's 512 MB) as the crawler grows the dataset;
-    # recency weighting already makes older matches near-weightless, so this barely moves the
-    # numbers. Lower it if the host still OOMs; raise/zero it on a bigger box.
+    # Cap the fallback empirical-stats build to the most recent N matches within the current
+    # balance era (0 = all current-era matches). Bounds peak RAM on small hosts. The home
+    # artifact builder uses the full active era; --all-eras is an explicit research/backtest
+    # override in the exporter.
     stats_max_matches: int = 60000
     # The frontend re-polls the roster so a long session picks up newly unlocked/upgraded
     # brawlers. Serve a cached roster for this many seconds so that polling (and multiple

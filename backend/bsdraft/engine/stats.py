@@ -55,6 +55,8 @@ class DraftStats:
         bracket: Optional[str] = None,
         fallback: Optional["DraftStats"] = None,
         recent_anchor_ts: int = 0,
+        analysis_start_ts: int = 0,
+        analysis_era_id: str = "",
     ):
         self.n = 0
         self.halflife_days = halflife_days
@@ -64,6 +66,8 @@ class DraftStats:
         # be handed the DATASET's newest ts instead: a thin bracket's own newest match can be
         # days old, and self-anchoring would report its pre-flip rotation as currently live.
         self.recent_anchor_ts = recent_anchor_ts
+        self.analysis_start_ts = int(analysis_start_ts or 0)
+        self.analysis_era_id = str(analysis_era_id or "")
         self.ts_max = 0              # newest match ts seen by this table's build (0 = none)
         self.b_games: dict = defaultdict(float)
         self.b_wins: dict = defaultdict(float)
@@ -100,7 +104,12 @@ class DraftStats:
         return [0.5 ** ((tmax - ts) / half) for ts in tss]
 
     def _build(self, matches: Iterable[dict]) -> None:
-        rows = [r for r in matches if r.get("a_won") is not None]
+        rows = [
+            r for r in matches
+            if r.get("a_won") is not None
+            and (not self.analysis_start_ts
+                 or int(r.get("ts") or 0) >= self.analysis_start_ts)
+        ]
         if self.bracket is not None:
             rows = [r for r in rows if match_bracket(r) == self.bracket]
         tss = [int(r.get("ts") or 0) for r in rows]
@@ -187,23 +196,40 @@ def build_bracketed(
     min_matches: int = MIN_BRACKET_MATCHES,
     matches: Optional[Iterable[dict]] = None,
     max_matches: int = 0,
+    analysis_start_ts: int = 0,
+    analysis_era_id: str = "",
 ) -> Tuple["DraftStats", Dict[str, "DraftStats"]]:
     """Build the global stats plus a per-rank-bracket table for each bracket with enough
     matches. Each bracket table shrinks toward the global one, so thin cells stay sensible
     instead of going noisy. ``max_matches`` caps the build to the most recent N matches
     (bounded-memory load) so peak RAM stays flat on a small instance as the dataset grows;
-    0 = use all. Returns ``(global_stats, {bracket: stats})``."""
+    0 = use all. When ``analysis_start_ts`` is set, the cap and all aggregate tables are
+    restricted to that inclusive timestamp. Returns ``(global_stats, {bracket: stats})``."""
     if matches is not None:
-        rows = list(matches)
+        rows = [r for r in matches
+                if not analysis_start_ts or int(r.get("ts") or 0) >= analysis_start_ts]
     elif max_matches and max_matches > 0:
-        rows = recent_matches(max_matches)
+        rows = recent_matches(max_matches, min_ts=analysis_start_ts)
     else:
-        rows = list(iter_matches())
-    global_stats = DraftStats(rows, halflife_days=halflife_days)
+        rows = [r for r in iter_matches()
+                if not analysis_start_ts or int(r.get("ts") or 0) >= analysis_start_ts]
+    global_stats = DraftStats(
+        rows,
+        halflife_days=halflife_days,
+        analysis_start_ts=analysis_start_ts,
+        analysis_era_id=analysis_era_id,
+    )
     counts = Counter(b for b in (match_bracket(r) for r in rows if r.get("a_won") is not None) if b)
     brackets = {
-        bk: DraftStats(rows, halflife_days=halflife_days, bracket=bk, fallback=global_stats,
-                       recent_anchor_ts=global_stats.ts_max)
+        bk: DraftStats(
+            rows,
+            halflife_days=halflife_days,
+            bracket=bk,
+            fallback=global_stats,
+            recent_anchor_ts=global_stats.ts_max,
+            analysis_start_ts=analysis_start_ts,
+            analysis_era_id=analysis_era_id,
+        )
         for bk, c in counts.items() if c >= min_matches
     }
     return global_stats, brackets

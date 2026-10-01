@@ -41,6 +41,12 @@ PYTHONPATH=backend python -m bsdraft.collect.profiles --limit 500 --recent-days 
 PYTHONPATH=backend python backend/scripts/export_itemstats.py                     # build itemstats.json.gz locally
 ```
 
+Training and stats export use the active balance era in
+[`data/reference/balance_eras.json`](../data/reference/balance_eras.json) by default. Use
+`--all-eras` only for an explicit historical research/backtest run; it must not produce the live
+stats or model artifact. The raw match archive is retained for drift detection and research, not
+because pre-change map cells should influence current recommendations.
+
 Live crawler loop (home machine): keep collection and artifact publishing local, but dispatch
 heavy model retrains to GitHub Actions on drift instead of training on the Mac:
 

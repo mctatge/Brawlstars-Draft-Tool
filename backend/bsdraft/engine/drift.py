@@ -10,8 +10,9 @@ we infer "the meta moved" from the matches we already collect, two complementary
   * new-content detection — brawler ids that appear in play but aren't in our reference yet,
     i.e. a freshly released brawler — a reliable "an update shipped" marker.
 
-Empirical stats are already recency-weighted (see :mod:`bsdraft.engine.stats`), so the meta
-self-corrects within ~a half-life of any change on its own. This module exists to react
+Empirical live stats are balance-era scoped and recency-weighted (see :mod:`bsdraft.engine.stats`),
+so serving tables do not carry old map cells across a reviewed balance boundary. This module
+intentionally continues to inspect the full raw archive: it exists to react
 *faster*: it surfaces a ``shifted`` flag the crawl loop or a scheduled check can act on —
 trigger a model retrain, briefly shorten the stats half-life, or mark affected brawlers
 low-confidence in the UI.
