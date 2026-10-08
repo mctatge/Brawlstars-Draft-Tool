@@ -1,3 +1,5 @@
+import { requestJson, type RequestOptions } from "./request-state";
+
 // Typed client for the draft API (FastAPI backend).
 
 export type Brawler = { id: number; name: string; cls: string; rarity: string; image_url: string };
@@ -115,6 +117,7 @@ export type OwnedBrawler = {
 };
 export type RosterResponse = {
   loaded: boolean; tag: string; name: string; owned: OwnedBrawler[];
+  stale?: boolean; // Client retained a last-good roster after a refresh failure.
   roster_schema?: number; // v3 adds tri-state Buffy ownership; absent means legacy/unknown
   error?: string | null;
 };
@@ -207,38 +210,26 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 // per-visitor personalization on the public site; defaults to the main API otherwise.
 const ROSTER_BASE = process.env.NEXT_PUBLIC_ROSTER_BASE || API_BASE;
 
-export async function getReference(): Promise<Reference> {
-  const res = await fetch(`${API_BASE}/api/reference`);
-  if (!res.ok) throw new Error(`reference: ${res.status}`);
-  return res.json();
+export function getReference(options?: RequestOptions): Promise<Reference> {
+  return requestJson(`${API_BASE}/api/reference`, "reference", {}, options);
 }
 
-export async function getHealth(): Promise<Health> {
-  const res = await fetch(`${API_BASE}/api/health`);
-  if (!res.ok) throw new Error(`health: ${res.status}`);
-  return res.json();
+export function getHealth(options?: RequestOptions): Promise<Health> {
+  return requestJson(`${API_BASE}/api/health`, "health", {}, options);
 }
 
-export async function getMeta(): Promise<Meta> {
-  const res = await fetch(`${API_BASE}/api/meta`);
-  if (!res.ok) throw new Error(`meta: ${res.status}`);
-  return res.json();
+export function getMeta(options?: RequestOptions): Promise<Meta> {
+  return requestJson(`${API_BASE}/api/meta`, "meta", {}, options);
 }
 
-export async function getRank(tag: string): Promise<RankInfo> {
-  // Through ROSTER_BASE (the keyed tunnel), not API_BASE: a live battle-log lookup gives the
-  // player's *current* tier, whereas the keyless API can only return the crawl snapshot, which
-  // goes stale across a Ranked season reset. Falls back to API_BASE when no tunnel is set.
-  const res = await fetch(`${ROSTER_BASE}/api/rank?tag=${encodeURIComponent(tag)}`);
-  if (!res.ok) throw new Error(`rank: ${res.status}`);
-  return res.json();
+export function getRank(tag: string, options?: RequestOptions): Promise<RankInfo> {
+  // A live profile lookup on the keyed roster host corrects ranks across season resets.
+  return requestJson(`${ROSTER_BASE}/api/rank?tag=${encodeURIComponent(tag)}`, "rank", {}, options);
 }
 
-export async function getRoster(tag?: string | null): Promise<RosterResponse> {
+export function getRoster(tag?: string | null, options?: RequestOptions): Promise<RosterResponse> {
   const qs = tag ? `?tag=${encodeURIComponent(tag)}` : "";
-  const res = await fetch(`${ROSTER_BASE}/api/roster${qs}`);
-  if (!res.ok) throw new Error(`roster: ${res.status}`);
-  return res.json();
+  return requestJson(`${ROSTER_BASE}/api/roster${qs}`, "roster", {}, options);
 }
 
 // Fire-and-forget: ask the scoring backend to pre-build this tag's personal stats so the first
@@ -248,27 +239,23 @@ export async function getRoster(tag?: string | null): Promise<RosterResponse> {
 // failures (including a 404 from a backend that predates the endpoint) are swallowed, because
 // the pick-phase build still covers the tag lazily.
 export function warmPersonal(tag: string): void {
-  fetch(`${API_BASE}/api/warm?tag=${encodeURIComponent(tag)}`).catch(() => {});
+  requestJson(`${API_BASE}/api/warm?tag=${encodeURIComponent(tag)}`, "warm").catch(() => {});
 }
 
-export async function getTopPicks(body: TopPicksBody): Promise<TopPicksResponse> {
-  const res = await fetch(`${API_BASE}/api/top_picks`, {
+export function getTopPicks(body: TopPicksBody, options?: RequestOptions): Promise<TopPicksResponse> {
+  return requestJson(`${API_BASE}/api/top_picks`, "top_picks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`top_picks: ${res.status}`);
-  return res.json();
+  }, options);
 }
 
-export async function recommend(body: RecommendBody): Promise<RecommendResponse> {
-  const res = await fetch(`${API_BASE}/api/recommend`, {
+export function recommend(body: RecommendBody, options?: RequestOptions): Promise<RecommendResponse> {
+  return requestJson(`${API_BASE}/api/recommend`, "recommend", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`recommend: ${res.status}`);
-  return res.json();
+  }, options);
 }
 
 export async function getPurchases(
@@ -281,7 +268,7 @@ export async function getPurchases(
   // Ranked power floor (9 through Diamond, 11 from Mythic up) that decides what's fieldable and
   // picks the bracket's stats table; power_floor pins the floor explicitly (user override); with
   // neither, the backend assumes the stricter Power 11.
-  const res = await fetch(`${API_BASE}/api/purchases`, {
+  return requestJson(`${API_BASE}/api/purchases`, "purchases", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -290,16 +277,12 @@ export async function getPurchases(
       power_floor: powerFloor || null,
     }),
   });
-  if (!res.ok) throw new Error(`purchases: ${res.status}`);
-  return res.json();
 }
 
 export async function getLoadout(brawlerId: number, mode: string, mapId?: number | null,
-                                 enemies?: number[]): Promise<LoadoutResponse> {
+                                 enemies?: number[], options?: RequestOptions): Promise<LoadoutResponse> {
   const qs = new URLSearchParams({ brawler: String(brawlerId), mode });
   if (mapId != null) qs.set("map_id", String(mapId));
   if (enemies && enemies.length) qs.set("enemies", enemies.join(","));  // comp-aware overlay
-  const res = await fetch(`${API_BASE}/api/loadout?${qs.toString()}`);
-  if (!res.ok) throw new Error(`loadout: ${res.status}`);
-  return res.json();
+  return requestJson(`${API_BASE}/api/loadout?${qs.toString()}`, "loadout", {}, options);
 }
