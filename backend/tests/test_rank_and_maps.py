@@ -22,7 +22,7 @@ class _FakeClient:
     def __init__(self, player=None, exc=None):
         self._player, self._exc = player, exc
 
-    def __call__(self):
+    def __call__(self, **kwargs):
         return self
 
     async def __aenter__(self):
@@ -40,8 +40,10 @@ class _FakeClient:
 @pytest.fixture(autouse=True)
 def _clear_rank_cache():
     M._rank_cache.clear()
+    M._profiles.clear()
     yield
     M._rank_cache.clear()
+    M._profiles.clear()
 
 
 def _client(monkeypatch, *, token, player=None, exc=None, dataset_tier=None):

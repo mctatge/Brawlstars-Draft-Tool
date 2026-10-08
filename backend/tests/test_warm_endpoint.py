@@ -217,20 +217,24 @@ def test_repeated_stale_reads_share_one_revalidation_scan(monkeypatch):
     assert calls == [key], "stale reads stacked redundant scans"
 
 
-def test_a_never_seen_tag_still_builds_inline(monkeypatch):
-    # Serve-stale needs something to serve: with no cache entry at all there's no better
-    # answer than the scan, so the miss path stays synchronous (the /api/warm ping on LOAD
-    # exists to make this case rare).
+def test_a_never_seen_tag_returns_before_background_history_finishes(monkeypatch):
+    gate, started = threading.Event(), threading.Event()
     calls = []
-
     def build(tag, fallback=None, **kw):
         calls.append(tag)
-        return "built-inline"
-
+        started.set()
+        assert gate.wait(5)
+        return "background-history"
     _reset(monkeypatch, build)
     key = M.normalize_tag(TAG)
-    assert M._personal_for(TAG) == "built-inline"      # returned synchronously
-    assert M._personal_cache[key] == (M._last_change, "built-inline")
+    try:
+        assert M._personal_for(TAG) is None
+        assert started.wait(2)
+        assert key not in M._personal_cache
+    finally:
+        gate.set()
+    assert _wait_for(lambda: key in M._personal_cache)
+    assert M._personal_for(TAG) == "background-history"
     assert calls == [key]
 
 
@@ -357,26 +361,16 @@ def test_duplicate_warm_before_the_worker_grabs_the_lock_takes_no_slot(monkeypat
     assert calls == [key]   # one worker ran one rebuild
 
 
-def test_ancient_lag_escalates_to_an_inline_rebuild_even_with_a_full_pool(monkeypatch):
-    # The staleness bound: revalidation is best-effort, so an entry whose data version lags
-    # beyond _STALE_LAG_MAX_SECONDS means the warm kept getting skipped — serving it stale
-    # yet again would let the lag grow without limit. Past the bound the read pays the
-    # blocking rebuild even when the pool is full (the pool caps background scans, not the
-    # request's own right to rebuild).
+def test_ancient_history_is_omitted_when_pool_is_full(monkeypatch):
     calls = []
-
-    def build(tag, fallback=None, **kw):
-        calls.append(tag)
-        return "fresh-stats"
-
-    _reset(monkeypatch, build)
+    _reset(monkeypatch, lambda tag, **kw: calls.append(tag))
     key = M.normalize_tag(TAG)
     M._personal_cache[key] = (M._last_change - M._STALE_LAG_MAX_SECONDS - 1, "ancient-stats")
     assert M._warm_slots.acquire(blocking=False) and M._warm_slots.acquire(blocking=False)
     try:
-        assert M._personal_for(TAG) == "fresh-stats"   # rebuilt inline, not served ancient
-        assert calls == [key]
-        assert M._personal_cache[key] == (M._last_change, "fresh-stats")
+        assert M._personal_for(TAG) is None
+        assert calls == []
+        assert M._personal_cache[key][1] == "ancient-stats"
     finally:
         M._warm_slots.release(); M._warm_slots.release()
 

@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # it alongside the dataset and hot-swaps the reloaded model in without a restart — so a
     # retrain (e.g. after a balance shift) rolls out live instead of waiting for a redeploy.
     model_url: str = ""
+    # Small GitHub release response whose body points to immutable, hash-bound weights and
+    # evaluation metrics. Prefer this over model_url, which is only a legacy bootstrap.
+    model_manifest_url: str = ""
     # URL of the published precomputed current-balance-era stats (stats.json.gz Release asset).
     # When set, the API LOADS it instead of rebuilding in memory. The home machine builds +
     # publishes it; see scripts/export_stats.py. An artifact from an older era is rejected.

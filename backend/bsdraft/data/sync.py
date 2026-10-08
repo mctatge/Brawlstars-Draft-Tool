@@ -14,14 +14,19 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import json
+import math
+import time
 import zlib
 from pathlib import Path
+from typing import Callable, Optional
 
 import httpx
 
 from bsdraft.constants import PROCESSED_DIR, RAW_DIR
 
 logger = logging.getLogger(__name__)
+_sync_status: dict = {}
 
 MATCHES_PATH = RAW_DIR / "matches.jsonl"
 _ETAG_PATH = RAW_DIR / ".matches.etag"
@@ -55,74 +60,163 @@ def _read(path: Path) -> str:
         return ""
 
 
-def _sync_file(url: str, dest: Path, etag_path: Path, sha_path: Path,
-               timeout: float, label: str) -> bool:
-    """Refresh ``dest`` from ``url`` if it changed. Returns True iff the local copy was
-    rewritten. Conditional GET (ETag) skips the download when nothing changed; a content hash
-    skips the rewrite when the bytes are identical; any network/HTTP failure leaves the
-    last-good local copy in place (returns False, never raises).
+def sync_status() -> dict:
+    """Small per-artifact status snapshot; errors contain categories, never remote URLs/secrets."""
+    return {name: dict(value) for name, value in _sync_status.copy().items()}
 
-    The response is **streamed** straight to disk, gunzipping on the fly when gzip-framed (a URL
-    may point at .gz or the raw file; winprob.npz is zip-framed, not gzip, so it passes through
-    untouched). This keeps peak RAM at one chunk rather than the whole file — matches.jsonl is
-    >130 MB decompressed, and holding it (plus zlib's scratch buffers) in memory was blowing the
-    512 MB free-tier limit on every hourly refresh."""
+
+def artifact_identity(path: Path, sha_path: Path) -> dict:
+    return {"sha256": _read(sha_path) or None,
+            "size_bytes": path.stat().st_size if path.exists() else None}
+
+
+def _validate_artifact(path: Path, label: str) -> None:
+    """Validate staged publications before replacing a usable local artifact."""
+    if not path.stat().st_size:
+        raise ValueError("empty artifact")
+    if label == "model":
+        import numpy as np
+        from bsdraft.models.serve import WinProbModel
+        from bsdraft.data import reference as reference
+        model = WinProbModel(path, validate_current_era=True)
+        if not model.available or not all(np.isfinite(w).all() for w in model._w.values()):
+            raise ValueError("invalid model weights or balance era")
+        ids = [b.id for b in reference.pickable_brawlers()][:6]
+        maps = reference.load_ranked_maps()
+        if len(ids) < 6 or not maps:
+            raise ValueError("missing reference vocabulary")
+        probability = model.prob(ids[:3], ids[3:], maps[0].id, maps[0].mode)
+        if not math.isfinite(probability) or not 0 <= probability <= 1:
+            raise ValueError("invalid model prediction")
+    elif label == "stats":
+        from bsdraft.data.balance_eras import current_balance_era
+        from bsdraft.engine.stats_store import load_stats
+        global_stats, brackets = load_stats(path)
+        era = current_balance_era()
+        for table in (global_stats, *brackets.values()):
+            if not isinstance(table.n, int) or table.n < 0:
+                raise ValueError("invalid stats sample count")
+            if era and (table.analysis_era_id != era.id or table.analysis_start_ts != era.start_ts):
+                raise ValueError("stats balance era mismatch")
+            for name in ("b_games", "b_wins", "map_games", "bm_games", "bm_wins",
+                         "cnt_games", "cnt_wins", "syn_games", "syn_wins"):
+                if any(not math.isfinite(v) or v < 0 for v in getattr(table, name).values()):
+                    raise ValueError("invalid stats value")
+    elif label == "rank index":
+        from bsdraft.engine.rank_store import load_rank_index
+        load_rank_index(path)
+    elif label == "meta report":
+        from bsdraft.engine.drift import load_report
+        report = load_report(path)
+        if report.n_recent < 0 or report.n_prior < 0 or report.newest_ts < 0:
+            raise ValueError("invalid meta sample count")
+    elif label == "itemstats":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("version") != 1 or
+                not isinstance(data.get("cells"), dict) or
+                not isinstance(data.get("meta"), dict)):
+            raise ValueError("invalid itemstats schema")
+        for cell in data["cells"].values():
+            if not isinstance(cell, dict):
+                raise ValueError("invalid itemstats cell")
+            for key in ("delta", "item_winrate", "n_eff", "n_players"):
+                if key in cell and (not isinstance(cell[key], (int, float)) or
+                                    not math.isfinite(cell[key])):
+                    raise ValueError("invalid itemstats value")
+    elif label == "matches":
+        # Transport completion is checked below. Sampling boundaries avoids replaying the
+        # entire multi-GB dataset on the public host just to validate a download.
+        with path.open("rb") as source:
+            first = source.readline(1 << 20)
+            source.seek(max(0, path.stat().st_size - (1 << 20)))
+            tail = source.read().splitlines()
+        for line in (first, tail[-1] if tail else b""):
+            row = json.loads(line)
+            if not isinstance(row, dict) or not {"team_a", "team_b", "map_id"} <= row.keys():
+                raise ValueError("invalid match schema")
+
+
+def _sync_file(url: str, dest: Path, etag_path: Path, sha_path: Path,
+               timeout: float, label: str,
+               validator: Optional[Callable[[Path], None]] = None) -> bool:
+    """Stream to staging, verify gzip completion and schema, then atomically promote.
+
+    Failed downloads and invalid HTTP-200 publications preserve the file and conditional-GET
+    metadata. The SHA is a content identity, not proof of independent publication provenance.
+    """
     if not url:
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-
     headers = {}
     etag = _read(etag_path)
     if etag and dest.exists():
         headers["If-None-Match"] = etag
-
     tmp = dest.parent / (dest.name + ".tmp")
-    hasher = hashlib.sha256()       # over the *decompressed* bytes, matching the stored .sha
-    new_etag = ""
+    hasher = hashlib.sha256()
+    started = time.monotonic()
+    now = time.time()
+    previous = _sync_status.get(label, {})
+    _sync_status[label] = {**previous, "last_attempt": now}
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout) as client:
             with client.stream("GET", url, headers=headers) as resp:
-                if resp.status_code == 304:
+                if resp.status_code == 304 and dest.exists():
+                    _sync_status[label].update(last_success=time.time(), error=None)
                     return False
                 resp.raise_for_status()
                 new_etag = resp.headers.get("ETag", "")
-                dec = None          # zlib gzip decompressor, created once we see the magic bytes
+                dec = None
+                prefix = b""
                 sniffed = False
                 with open(tmp, "wb") as out:
                     for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                        if time.monotonic() - started > timeout:
+                            raise TimeoutError("artifact deadline exceeded")
                         if not chunk:
                             continue
                         if not sniffed:
+                            prefix += chunk
+                            if len(prefix) < 2:
+                                continue
+                            chunk, prefix = prefix, b""
                             sniffed = True
                             if chunk[:2] == b"\x1f\x8b":
-                                dec = zlib.decompressobj(wbits=31)  # 16 + MAX_WBITS = gzip framing
+                                dec = zlib.decompressobj(wbits=31)
                         if dec is not None:
                             chunk = dec.decompress(chunk)
                         if chunk:
                             hasher.update(chunk)
                             out.write(chunk)
+                    if prefix:
+                        hasher.update(prefix)
+                        out.write(prefix)
                     if dec is not None:
                         tail = dec.flush()
+                        if not dec.eof or dec.unused_data:
+                            raise ValueError("incomplete or trailing gzip data")
                         if tail:
                             hasher.update(tail)
                             out.write(tail)
-    except Exception as e:  # noqa: BLE001 — never let a sync failure take down serving
-        logger.warning("%s sync failed (%s); keeping last-good copy", label, e)
+        sha = hasher.hexdigest()
+        if sha != _read(sha_path) or not dest.exists():
+            (validator or (lambda path: _validate_artifact(path, label)))(tmp)
+            tmp.replace(dest)
+            sha_path.write_text(sha, encoding="utf-8")
+            changed = True
+        else:
+            tmp.unlink(missing_ok=True)
+            changed = False
+        # Do not pin the remote ETag until validation/promotion succeeds.
+        etag_path.write_text(new_etag, encoding="utf-8")
+        _sync_status[label].update(last_success=time.time(), error=None, sha256=sha)
+        if changed:
+            logger.info("%s updated (%.2f MB)", label, dest.stat().st_size / 1e6)
+        return changed
+    except Exception as exc:  # no signed URL, auth header, or upstream response in public errors
+        _sync_status[label].update(error=type(exc).__name__)
+        logger.warning("%s sync rejected (%s); keeping last-good copy", label, type(exc).__name__)
         tmp.unlink(missing_ok=True)
         return False
-
-    if new_etag:
-        etag_path.write_text(new_etag, encoding="utf-8")
-
-    sha = hasher.hexdigest()
-    if sha == _read(sha_path) and dest.exists():
-        tmp.unlink(missing_ok=True)
-        return False  # bytes identical — nothing downstream to rebuild
-
-    tmp.replace(dest)  # atomic swap on POSIX
-    sha_path.write_text(sha, encoding="utf-8")
-    logger.info("%s updated (%.2f MB)", label, dest.stat().st_size / 1e6)
-    return True
 
 
 def sync_matches(url: str, timeout: float = 60.0) -> bool:
