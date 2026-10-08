@@ -97,7 +97,7 @@ class WinProbModel:
                     return
             self.cfg = json.loads(data["_config"].item())
             self._w = {k: data[k].astype(np.float32) for k in data.files
-                       if k not in ("_config", "_analysis") and not k.startswith("_vocab_")}
+                       if not k.startswith("_")}
             self._load_vocab(data)
             self._add_fallback_rows()
             self._class_rows = self._build_class_rows()
