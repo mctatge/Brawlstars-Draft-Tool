@@ -1,0 +1,182 @@
+{
+  "recorded_at": "2026-10-08T14:22:22.095506+00:00",
+  "stats_matches": 5990,
+  "source_note": "Aggregate statistics from a bounded current-era local match sample; model from data-latest. Not a full-population evaluation.",
+  "era_id": "2026-09-16",
+  "model_sha256": "0ae16e9353ad494513da640a200f4562b811d408df6986d5500a439afc0cb11e",
+  "stats_sha256": "76f9d2e7d0f08f9100c14db0616a8194f44a272164cfda7b91645b9ab8abf2ae",
+  "map": {
+    "id": 15000368,
+    "name": "Belles Rock",
+    "mode": "Knockout"
+  },
+  "steps": [
+    {
+      "title": "Choose your first pick",
+      "note": "Start with the map and an empty board. Compare the four candidates.",
+      "allies": [],
+      "enemies": [],
+      "picks": [
+        {
+          "brawler_id": 16000014,
+          "name": "Bo",
+          "cls": "Controller",
+          "score": 0.5796803904686034,
+          "map_winrate": 0.6109540032458562,
+          "counter": null,
+          "synergy": null,
+          "win_prob": 0.5117483229784145,
+          "confidence": 0.08925123837924426
+        },
+        {
+          "brawler_id": 16000046,
+          "name": "Belle",
+          "cls": "Marksman",
+          "score": 0.5765282994588175,
+          "map_winrate": 0.5967957661681595,
+          "counter": null,
+          "synergy": null,
+          "win_prob": 0.49959564427347103,
+          "confidence": 0.16602436643288107
+        },
+        {
+          "brawler_id": 16000067,
+          "name": "Willow",
+          "cls": "Controller",
+          "score": 0.5721709195862004,
+          "map_winrate": 0.5157147623726093,
+          "counter": null,
+          "synergy": null,
+          "win_prob": 0.5504987477412447,
+          "confidence": 0.0
+        },
+        {
+          "brawler_id": 16000065,
+          "name": "Mandy",
+          "cls": "Marksman",
+          "score": 0.5642061358057252,
+          "map_winrate": 0.5502029410463952,
+          "counter": null,
+          "synergy": null,
+          "win_prob": 0.4975671038185497,
+          "confidence": 0.08557437336812175
+        }
+      ]
+    },
+    {
+      "title": "Read the enemy picks",
+      "note": "Your first pick is locked. Two enemy picks now change the matchup and the ranking.",
+      "allies": [
+        "Bo"
+      ],
+      "enemies": [
+        "Mico",
+        "Mina"
+      ],
+      "picks": [
+        {
+          "brawler_id": 16000106,
+          "name": "Bolt",
+          "cls": "Tank",
+          "score": 0.5448193841953266,
+          "map_winrate": 0.6039055629797178,
+          "counter": 0.5340792651343231,
+          "synergy": 0.5603597420711082,
+          "win_prob": 0.5225228832999429,
+          "confidence": 0.0907480293213757
+        },
+        {
+          "brawler_id": 16000066,
+          "name": "R-T",
+          "cls": "Damage Dealer",
+          "score": 0.536582397925337,
+          "map_winrate": 0.5000080716911693,
+          "counter": 0.5294708309097744,
+          "synergy": 0.5,
+          "win_prob": 0.5767155345514746,
+          "confidence": 0.0
+        },
+        {
+          "brawler_id": 16000046,
+          "name": "Belle",
+          "cls": "Marksman",
+          "score": 0.5234237680855756,
+          "map_winrate": 0.5967957661681595,
+          "counter": 0.499537811325507,
+          "synergy": 0.38678301111681695,
+          "win_prob": 0.42904772094977167,
+          "confidence": 0.16602436643288107
+        },
+        {
+          "brawler_id": 16000026,
+          "name": "Bibi",
+          "cls": "Tank",
+          "score": 0.5185542938291121,
+          "map_winrate": 0.5168179724053255,
+          "counter": 0.5673282370911479,
+          "synergy": 0.5644275422688795,
+          "win_prob": 0.4941569404902682,
+          "confidence": 0.0
+        }
+      ]
+    },
+    {
+      "title": "Complete your team",
+      "note": "With two allies locked, the remaining candidates are scored for this specific composition.",
+      "allies": [
+        "Bo",
+        "Bolt"
+      ],
+      "enemies": [
+        "Mico",
+        "Mina"
+      ],
+      "picks": [
+        {
+          "brawler_id": 16000066,
+          "name": "R-T",
+          "cls": "Damage Dealer",
+          "score": 0.571645321681356,
+          "map_winrate": 0.5000080716911693,
+          "counter": 0.5294708309097744,
+          "synergy": 0.5,
+          "win_prob": 0.6643728439415217,
+          "confidence": 0.0
+        },
+        {
+          "brawler_id": 16000046,
+          "name": "Belle",
+          "cls": "Marksman",
+          "score": 0.5676264447527409,
+          "map_winrate": 0.5967957661681595,
+          "counter": 0.499537811325507,
+          "synergy": 0.4126936773450403,
+          "win_prob": 0.5363155793391571,
+          "confidence": 0.16602436643288107
+        },
+        {
+          "brawler_id": 16000057,
+          "name": "Janet",
+          "cls": "Marksman",
+          "score": 0.557089639217198,
+          "map_winrate": 0.4547892215682151,
+          "counter": 0.5108628175313923,
+          "synergy": 0.5108701272040537,
+          "win_prob": 0.5641906598966576,
+          "confidence": 0.0
+        },
+        {
+          "brawler_id": 16000071,
+          "name": "Doug",
+          "cls": "Support",
+          "score": 0.5540959616985763,
+          "map_winrate": 0.5209846127840734,
+          "counter": 0.46905498869543905,
+          "synergy": 0.538300987876938,
+          "win_prob": 0.6328094034240583,
+          "confidence": 0.0
+        }
+      ]
+    }
+  ]
+}

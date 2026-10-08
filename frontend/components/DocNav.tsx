@@ -3,6 +3,7 @@ import Logo from "@/components/Logo";
 // Site-wide nav for the written pages. The board lives at "/", so it leads.
 export const NAV = [
   { href: "/", label: "Draft board" },
+  { href: "/demo", label: "Try example" },
   { href: "/purchases", label: "Upgrades" },
   { href: "/guide", label: "Draft guide" },
   { href: "/guides", label: "Mode guides" },

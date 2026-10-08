@@ -12,11 +12,14 @@ AI ranked-draft assistant for Brawl Stars: a Python win-probability model + draf
 
 ## Where things live
 
+This file is a router, not a store: put specific facts in subdocs and keep one-line pointers here.
+
 | Doc | What it covers | When to read it |
 | --- | --- | --- |
 | [docs/dev-commands.md](docs/dev-commands.md) | Every command: setup, run the API, collect→train→export pipeline, tests, frontend dev/build | Before running, training, or testing anything |
 | [docs/backend-architecture.md](docs/backend-architecture.md) | Backend layers, data flow, the four cross-cutting design constraints, the two recommend endpoints | Before changing anything under `backend/bsdraft/` |
 | [docs/deployment-topology.md](docs/deployment-topology.md) | Home crawler → GitHub Release artifacts → Render hot-swap; keepwarm/drift Actions; roster tunnel | Before touching `deploy/`, `data/sync.py`, `render.yaml`, `.github/workflows/`, artifact export scripts, or any `*_URL` env var — and when debugging the live site |
+| [docs/reliability-and-publication.md](docs/reliability-and-publication.md) | Request/account correctness, service bounds, CI gates, immutable model bundles and migration | Before changing async recommendations, model publication or serving provenance; when planning rollout |
 | [data/reference/balance_eras.json](data/reference/balance_eras.json) + [docs/dev-commands.md](docs/dev-commands.md) | Active balance-era cutoff for live stats/model artifacts; raw-history research override | Before changing the live analysis window or running a full-history backtest |
 | [docs/MODEL_CARD.md](docs/MODEL_CARD.md) | The win-probability model: math, training data, calibration, limitations | Before changing model architecture, features, or training |
 | [docs/model-evaluation.md](docs/model-evaluation.md) | Held-out ablations behind `DEFAULT_WEIGHTS`; why signal weights are global, not per-map | Before changing `engine/scoring.py` weights or adding/removing a scoring signal |

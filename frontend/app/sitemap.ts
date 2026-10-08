@@ -10,7 +10,7 @@ const BASE = "https://brawldraft.com";
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const pages = [
-    "", "/how-it-works", "/faq", "/guide", "/guides",
+    "", "/demo", "/how-it-works", "/faq", "/guide", "/guides",
     ...rankedModes().map((m) => `/guides/${m.slug}`),
     "/purchases", "/model", "/about", "/contact", "/privacy",
   ];

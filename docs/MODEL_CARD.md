@@ -10,6 +10,10 @@ trained input, not a gap to fill.
 > against the empirical signals in the pick blend, and an ablation testing whether that
 > weighting should depend on the map/mode (it shouldn't).
 
+> Current statistics come from `/api/model` and appear at `/model` only when the report is
+> verified against the exact served weights. Numerical results below are historical.
+> For the enforced CI/release protocol, read [reliability-and-publication.md](reliability-and-publication.md).
+
 ## Intended use
 
 - **Primary:** rank candidate picks by their marginal effect on win-probability during a
@@ -26,7 +30,7 @@ trained input, not a gap to fill.
   harvests the other five player tags from every ranked match to expand the frontier. Matches
   are deduped by a stable key (`battleTime` + sorted player tags), since one match appears in
   up to six players' logs.
-- **Size:** ~1.06M labeled unique ranked matches (1,059,778 at the current retrain). Each row
+- **Historical snapshot:** 1,059,778 labeled unique ranked matches in the experiment below. Each row
   is `(map, mode, team A brawlers[3], team B brawlers[3]) → winner`. Per-brawler power level,
   Ranked tier (the API's `trophies` field), and the queue type (`soloRanked`/`teamRanked`) are
   also stored, but they are **not** model features — the tier drives bracket-stratified
@@ -107,7 +111,7 @@ embeddings and MLP, which is why retrains are gated by a paired full-comp compar
 
 The objective is **recency-weighted binary cross-entropy** on the win label $y_i \in \{0, 1\}$ ($1$
 when team $A$ won). Each match is down-weighted by an exponential time-decay so the fit leans toward
-the live meta across balance patches:
+the recent meta within the reviewed active balance era:
 
 $$
 \mathcal{L}(\theta) = -\sum_i w_i \big[\, y_i \log \hat p_i + (1 - y_i)\log(1 - \hat p_i) \,\big],
@@ -129,18 +133,21 @@ about half the weight of a fresh one; the weights are normalized to mean $1$).
 - **Recency weighting** uses the same exponential time-decay as the empirical stats table, so the
   model and the stats both lean on recent matches; pass a non-positive half-life to disable it
   (uniform weights) for backtests.
-- **Split:** random 85/15 train/val (seeded). Optimizer AdamW, weight decay 1e-4, early
-  stopping on a fixed masked copy of the val split (same mixture as training, so full-comp
-  regressions still move it); headline metrics are reported unmasked for comparability.
-- **Baselines:** (a) constant 0.5, (b) logistic regression on signed brawler-presence features,
-  (c) **paired**: the previous checkpoint evaluated on the same val rows — the only comparison
-  free of data drift, and the no-regression gate for every retrain. The 1v0 state is also
-  checked against a shrunk brawler-map winrate marginal (the cheapest single-pick predictor);
-  the net must at least match it or the masking design is washing out low-information states.
+- **Split:** chronological training/selection/final test (target 70/15/15; equal timestamps stay
+  together). Early stopping and candidate choice use selection only. Final test rows must be
+  newer than the released incumbent's full data watermark and prior reserved test attempts;
+  at least 1,000 are required. Legacy bootstrap explicitly labels unknown incumbent overlap.
+- **Baselines:** constant 0.5, train-only brawler-presence logistic regression, and the actual
+  released NumPy incumbent with pinned vocabularies, evaluated on identical final test rows.
+  CI requires this incumbent and an enabled full-comp log-loss regression bound (0.0035 in
+  the retraining workflow). Missing or invalid baseline stops publication. AUC, ECE, and the
+  empirical 1v0 comparison are reported diagnostics; no performance threshold gates them.
 
-## Evaluation
+## Historical evaluation — masked-draft experiment
 
-Held-out validation (158,966 of 1,059,778 matches), full comps:
+This experiment used a random validation split for early stopping and reporting. It is retained
+for architecture history; it is not the new chronological final-test protocol or a description
+of today's served model. Held-out validation (158,966 of 1,059,778 matches), full comps:
 
 | Model | Log-loss ↓ | Accuracy ↑ | AUC ↑ | ECE ↓ |
 | --- | --- | --- | --- | --- |

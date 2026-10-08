@@ -4,6 +4,18 @@ Notable, user-visible changes to [brawldraft.com](https://brawldraft.com). The s
 continuously from `main`, so entries are **dated, not versioned** — newest first. Routine
 retrains, doc edits, and internal refactors are left out unless they changed what users see.
 
+## Unreleased
+
+- Recommendation cards track the current map, board and active slot; outdated requests cannot
+  overwrite advice or place an ineligible brawler in the user's seat.
+- Failed roster refreshes retain the same account's last good roster with a stale warning;
+  cleared accounts and live unplaced ranks cannot be restored by late replies.
+- A dated three-step example works without the live API or account lookup. The site now states
+  its experimental-beta scope, service limits and unmeasured player benefit.
+- Current model statistics come from a verified weights/metrics bundle. Legacy or unreachable
+  reports show unavailable instead of historical figures. Publication requires the released
+  incumbent, fresh reserved test data, export checks and a verified immutable release.
+
 ## 2026-10-01
 
 - **Live analysis now starts at the active balance boundary.** Map, matchup, synergy, personal,
