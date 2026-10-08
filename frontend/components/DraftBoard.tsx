@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Brawler, PickRec, BanRec, Reference, RecommendResponse, Warning, RosterResponse, GamePlan, Health, Meta, RankInfo, TopPick,
+  Brawler, PickRec, BanRec, Reference, RecommendResponse, RosterResponse, GamePlan, Health, Meta, RankInfo, TopPick,
   LoadoutResponse, LoadoutItem, OwnedBrawler, ReadinessReason,
   getReference, getRoster, recommend, getHealth, getMeta, getRank, getTopPicks, getLoadout, warmPersonal,
 } from "@/lib/api";
+import { LatestRequest, currentResult, normalizePlayerTag, preserveRoster, type KeyedResult } from "@/lib/request-state";
 import AdSlot from "@/components/AdSlot";
 import Logo from "@/components/Logo";
 
@@ -668,6 +669,7 @@ function BootScreen({ show, error, onRetry }: { show: boolean; error: string | n
         <Logo size={26} />
         <span className="brand-gradient text-lg tracking-tight">BRAWL DRAFT</span>
         <span className="label">// RANKED DRAFT CONSOLE</span>
+        <a href="/demo" className="seg ml-auto px-3 py-2 text-xs">TRY EXAMPLE ↗</a>
       </header>
       <div className="min-h-[55vh] grid place-items-center">
         {error ? (
@@ -682,7 +684,7 @@ function BootScreen({ show, error, onRetry }: { show: boolean; error: string | n
             <Spinner />
             <div className="mt-4 mono text-[13px] font-semibold text-[var(--text)] caret">BOOTING DRAFT SERVER</div>
             <div className="mt-2 mono text-[11px] text-[var(--muted)] max-w-xs mx-auto">
-              First hit can take ~30-45s on the free tier. It stays fast once warm.
+              The live beta can take time to wake. We stop retrying after 90 seconds. Try the saved example above while you wait.
             </div>
           </div>
         ) : null}
@@ -693,7 +695,11 @@ function BootScreen({ show, error, onRetry }: { show: boolean; error: string | n
 
 export default function DraftBoard() {
   const [ref, setRef] = useState<Reference | null>(null);
-  const [roster, setRoster] = useState<RosterResponse | null>(null);
+  const [rosterState, setRoster] = useState<RosterResponse | null>(null);
+  const [accountTag, setAccountTag] = useState<string | null>(null);
+  const accountTagRef = useRef<string | null>(null);
+  const rankRequests = useRef(new LatestRequest());
+  const roster = rosterState && normalizePlayerTag(rosterState.tag) === accountTag ? rosterState : null;
   const [health, setHealth] = useState<Health | null>(null);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [tag, setTag] = useState("");
@@ -709,14 +715,14 @@ export default function DraftBoard() {
   // pick or ban. Entries may go stale (a slot later cleared or refilled); undoLast skips those.
   const [placeHistory, setPlaceHistory] = useState<Slot[]>([]);
   const [solo, setSolo] = useState(true);
-  const [recs, setRecs] = useState<RecommendResponse | null>(null);
+  const [recResult, setRecResult] = useState<KeyedResult<RecommendResponse> | null>(null);
+  const [recError, setRecError] = useState<KeyedResult<string> | null>(null);
   // Blind-pick dual columns only: the personalized pick list fetched alongside the general one.
-  const [personalRecs, setPersonalRecs] = useState<RecommendResponse | null>(null);
+  const [personalResult, setPersonalResult] = useState<KeyedResult<RecommendResponse> | null>(null);
   const [personalLoading, setPersonalLoading] = useState(false);
-  const [personalErr, setPersonalErr] = useState<string | null>(null);
-  const [topPicks, setTopPicks] = useState<TopPick[]>([]);
+  const [personalError, setPersonalError] = useState<KeyedResult<string> | null>(null);
+  const [topResult, setTopResult] = useState<KeyedResult<TopPick[]> | null>(null);
   const [railOk, setRailOk] = useState(true);
-  const [warnings, setWarnings] = useState<Warning[]>([]);
   const [query, setQuery] = useState("");
   const [gridFocus, setGridFocus] = useState(0); // roving tab-stop index into the brawler grid (arrow-key nav)
   const [mySeat, setMySeat] = useState<number | null>(null); // which "our" slot is the user (in pick order)
@@ -730,40 +736,93 @@ export default function DraftBoard() {
   const gridRef = useRef<HTMLDivElement>(null);
   const focusSearch = () => searchRef.current?.focus({ preventScroll: true });
 
+  // All rank entry points share one request owner. Editing/clearing an account invalidates
+  // requests immediately, before effects run, so an old response cannot restore that account.
+  const lookupRank = (value: string, background = false) => {
+    const requestedTag = normalizePlayerTag(value);
+    if (!requestedTag) return;
+    if (!background) {
+      accountTagRef.current = requestedTag;
+      setAccountTag(requestedTag);
+    }
+    const request = rankRequests.current.start();
+    if (!background) setRankLoading(true);
+    (async () => {
+      try {
+        const info = await getRank(requestedTag, { signal: request.signal });
+        if (!request.current() || accountTagRef.current !== requestedTag) return;
+        if (normalizePlayerTag(info.tag) !== requestedTag) return;
+        // Live unplaced is a definitive answer after a season reset. An unavailable background
+        // lookup is not, and must leave the last known rank intact.
+        if (background && !info.found && info.source !== "live") return;
+        setRankInfo(info);
+        if (info.found) {
+          setTag(info.tag);
+          localStorage.setItem("bsdraft.tag", info.tag);
+          warmPersonal(info.tag);
+        }
+      } catch (e) {
+        if (request.current() && accountTagRef.current === requestedTag && !background)
+          setRankInfo({ found: false, tag: requestedTag, tier: null, tier_label: null,
+            bracket: null, source: null, error: String(e) });
+      } finally {
+        if (request.current()) setRankLoading(false);
+      }
+    })();
+    return request;
+  };
+
+  const changeTag = (value: string) => {
+    rankRequests.current.cancel();
+    setRankLoading(false);
+    setTag(value);
+    if (normalizePlayerTag(value) !== accountTagRef.current) {
+      accountTagRef.current = null;
+      setAccountTag(null);
+      setRankInfo(null);
+      setRoster(null);
+      localStorage.removeItem("bsdraft.tag");
+    }
+  };
+
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     const started = Date.now();
     (async () => {
-      for (let attempt = 0; !cancelled; attempt++) {
+      for (let attempt = 0; !controller.signal.aborted; attempt++) {
+        const remaining = 90_000 - (Date.now() - started);
+        if (remaining <= 0) { setErr("reference: service did not respond within 90 seconds"); return; }
         try {
-          const r = await getReference();
-          if (cancelled) return;
+          const r = await getReference({ signal: controller.signal, timeoutMs: Math.min(30_000, remaining) });
+          if (controller.signal.aborted) return;
           const best = [...r.maps].filter((m) => m.games > 0).sort((a, b) => b.games - a.games)[0] || r.maps[0];
           setRef(r);
           if (best) setMapId(best.id);
           setErr(null);
-          getHealth().then(setHealth).catch(() => {});
-          getMeta().then(setMeta).catch(() => {});
+          getHealth({ signal: controller.signal }).then((h) => { if (!controller.signal.aborted) setHealth(h); }).catch(() => {});
+          getMeta({ signal: controller.signal }).then((m) => { if (!controller.signal.aborted) setMeta(m); }).catch(() => {});
           return;
         } catch (e) {
-          if (cancelled) return;
-          if (Date.now() - started > 90_000) { setErr(String(e)); return; }
-          await new Promise((res) => setTimeout(res, Math.min(5000, 800 * (attempt + 1))));
+          if (controller.signal.aborted) return;
+          const left = 90_000 - (Date.now() - started);
+          if (left <= 0) { setErr(String(e)); return; }
+          await new Promise((res) => setTimeout(res, Math.min(left, 5000, 800 * (attempt + 1))));
         }
       }
     })();
+    return () => controller.abort();
+  }, [bootNonce]);
+
+  useEffect(() => {
     const savedTag = localStorage.getItem("bsdraft.tag");
-    if (savedTag) {
-      setTag(savedTag);
-      getRank(savedTag).then(setRankInfo).catch(() => {});
-    }
-    const savedSeat = localStorage.getItem("bsdraft.myseat");  // null when never chosen — must stay null (personalization off by default)
+    if (savedTag) { setTag(savedTag); lookupRank(savedTag); }
+    const savedSeat = localStorage.getItem("bsdraft.myseat");
     if (savedSeat != null) {
       const n = Number(savedSeat);
       if (Number.isInteger(n) && n >= 0 && n < TEAM_N) setMySeat(n);
     }
-    return () => { cancelled = true; };
-  }, [bootNonce]);
+    return () => rankRequests.current.cancel();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (ref || err) { setSlowBoot(false); return; }
@@ -774,32 +833,23 @@ export default function DraftBoard() {
   // autofocus the keyboard-first placer once the board is live, so logging is instant
   useEffect(() => { if (ref) focusSearch(); }, [ref]);
 
-  const rosterTag = rankInfo?.tag ?? null;
+  const rosterTag = accountTag && normalizePlayerTag(rankInfo?.tag || "") === accountTag ? rankInfo?.tag ?? null : null;
 
   useEffect(() => {
-    // No tag → no personalization. Never poll tag-less: the backend used to answer a tag-less
-    // request with the operator's own roster, leaking their identity to every visitor.
     if (!rosterTag) { setRoster(null); return; }
-    // Different player → drop the previous one's roster up front, so the `cur.loaded` check in the
-    // catch below can never mistake a stale roster for this tag's. Re-polls don't re-run this effect.
     setRoster(null);
-    let cancelled = false;
+    const requests = new LatestRequest();
     let last = 0;
     const pull = () => {
       last = Date.now();
-      getRoster(rosterTag)
-        .then((r) => { if (!cancelled) setRoster(r); })
-        .catch((e) => {
-          // Surface the failure instead of swallowing it: an upstream outage (the roster tunnel's
-          // Supercell key 403ing on an IP rotation) used to present as inert seat checkboxes with
-          // no explanation. But don't wipe a roster that already loaded — a blip on a later poll
-          // shouldn't drop personalization mid-draft.
-          if (!cancelled)
-            setRoster((cur) => cur?.loaded ? cur : {
-              loaded: false, tag: rosterTag, name: "", owned: [],
-              error: String((e as Error)?.message || e),
-            });
-        });
+      const request = requests.start();
+      const apply = (incoming: RosterResponse) => {
+        if (request.current() && accountTagRef.current === normalizePlayerTag(rosterTag))
+          setRoster((cur) => preserveRoster(cur, incoming, rosterTag));
+      };
+      getRoster(rosterTag, { signal: request.signal })
+        .then(apply)
+        .catch((e) => apply({ loaded: false, tag: rosterTag, name: "", owned: [], error: String(e) }));
     };
     pull();
     const id = setInterval(pull, ROSTER_POLL_MS);
@@ -807,7 +857,7 @@ export default function DraftBoard() {
       if (document.visibilityState === "visible" && Date.now() - last > 60_000) pull();
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => { cancelled = true; clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
+    return () => { requests.cancel(); clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, [rosterTag]);
 
   const byId = useMemo(() => {
@@ -980,6 +1030,17 @@ export default function DraftBoard() {
     return () => window.removeEventListener("keydown", onKey);
   }, [pickSeq, active, our, their]);
 
+  const boardKey = JSON.stringify([mapId, mode, our, their, bans, wePickFirst, solo, phase,
+    myTurn, fieldableOwned, bracket, personalTag, blindPick, active, accountTag]);
+  const topKey = JSON.stringify([mapId, mode, our, their, bans, bracket, blindPick]);
+  const recs = currentResult(recResult, boardKey);
+  const personalRecs = blindPick && personalizeReady && phase === "pick"
+    ? currentResult(personalResult, boardKey) : null;
+  const personalErr = currentResult(personalError, boardKey);
+  const topPicks = currentResult(topResult, topKey) || [];
+  const warnings = recs?.warnings || [];
+  const displayErr = err || currentResult(recError, boardKey);
+
   useEffect(() => {
     if (!mapId || !mode) return;
     // Roster + mastery + your win-rates apply to YOUR pick only (the seat you marked); a teammate
@@ -998,22 +1059,25 @@ export default function DraftBoard() {
       roster: myTurn ? fieldableOwned : null,
       rank_bracket: bracket, top: 12,
     };
+    const request = new LatestRequest().start();
     setLoading(true);
     const t = setTimeout(() => {
-      recommend(body)
-        .then((r) => { setRecs(r); setWarnings(r.warnings || []); })
-        .catch((e) => setErr(String(e)))
-        .finally(() => setLoading(false));
+      recommend(body, { signal: request.signal })
+        .then((r) => { if (request.current()) { setRecResult({ key: boardKey, data: r }); setRecError(null); } })
+        .catch((e) => { if (request.current()) setRecError({ key: boardKey, data: String(e) }); })
+        .finally(() => { if (request.current()) setLoading(false); });
     }, 120);
-    return () => clearTimeout(t);
-  }, [mapId, mode, our, their, bans, wePickFirst, solo, phase, myTurn, fieldableOwned, bracket, personalTag, blindPick]);
+    return () => { request.cancel(); clearTimeout(t); };
+  }, [mapId, mode, our, their, bans, wePickFirst, solo, phase, myTurn, fieldableOwned, bracket, personalTag, blindPick, boardKey]);
 
   // Second fetch for the blind-pick dual columns: the personalized list (owned + fieldable +
   // boosted, mastery and your own win-rates folded in). Runs alongside the general fetch above —
   // under blind pick there's no seat/turn to gate on, the whole pick phase is "your pick".
   useEffect(() => {
-    if (!blindPick || !personalizeReady) { setPersonalRecs(null); setPersonalErr(null); return; }
-    if (!mapId || !mode || phase !== "pick") return;
+    if (!blindPick || !personalizeReady || !mapId || !mode || phase !== "pick") {
+      setPersonalLoading(false);
+      return;
+    }
     const body = {
       map_id: mapId, mode,
       our_team: our.filter((x): x is number => x != null),
@@ -1023,15 +1087,16 @@ export default function DraftBoard() {
       personalize: true, personal_tag: personalTag,
       roster: fieldableOwned, rank_bracket: bracket, top: 12,
     };
+    const request = new LatestRequest().start();
     setPersonalLoading(true);
     const t = setTimeout(() => {
-      recommend(body)
-        .then((r) => { setPersonalRecs(r); setPersonalErr(null); })
-        .catch(() => setPersonalErr("couldn't score your picks — retrying on the next board change"))
-        .finally(() => setPersonalLoading(false));
+      recommend(body, { signal: request.signal })
+        .then((r) => { if (request.current()) { setPersonalResult({ key: boardKey, data: r }); setPersonalError(null); } })
+        .catch(() => { if (request.current()) setPersonalError({ key: boardKey, data: "couldn't score your picks — retrying on the next board change" }); })
+        .finally(() => { if (request.current()) setPersonalLoading(false); });
     }, 120);
-    return () => clearTimeout(t);
-  }, [blindPick, personalizeReady, mapId, mode, our, bans, solo, phase, fieldableOwned, bracket, personalTag]);
+    return () => { request.cancel(); clearTimeout(t); };
+  }, [blindPick, personalizeReady, mapId, mode, our, bans, solo, phase, fieldableOwned, bracket, personalTag, boardKey]);
 
   useEffect(() => {
     if (!mapId || !mode) return;
@@ -1042,14 +1107,14 @@ export default function DraftBoard() {
       bans: bans.filter((x): x is number => x != null),
       rank_bracket: bracket, top: 10,
     };
-    let cancelled = false;
+    const request = new LatestRequest().start();
     const t = setTimeout(() => {
-      getTopPicks(body)
-        .then((r) => { if (!cancelled) { setTopPicks(r.picks); setRailOk(true); } })
-        .catch(() => { if (!cancelled) setRailOk(false); });
+      getTopPicks(body, { signal: request.signal })
+        .then((r) => { if (request.current()) { setTopResult({ key: topKey, data: r.picks }); setRailOk(true); } })
+        .catch(() => { if (request.current()) setRailOk(false); });
     }, 120);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [mapId, mode, our, their, bans, bracket, blindPick]);
+    return () => { request.cancel(); clearTimeout(t); };
+  }, [mapId, mode, our, their, bans, bracket, blindPick, topKey]);
 
   const setZone = (zone: Zone, idx: number, val: number | null) => {
     const apply = (arr: (number | null)[]) => arr.map((x, i) => (i === idx ? val : x));
@@ -1059,7 +1124,8 @@ export default function DraftBoard() {
   };
 
   const place = (bid: number) => {
-    if (!active || used.has(bid)) return;
+    if (!active || !byId.has(bid) || used.has(bid) ||
+      (myTurn && !fieldableSet.has(bid) && !boostedSet.has(bid))) return;
     const slot = active;
     setZone(slot.zone, slot.index, bid);
     setPlaceHistory((h) => [...h, slot]);   // remember it so Backspace can undo this placement
@@ -1098,58 +1164,19 @@ export default function DraftBoard() {
     setPlaceHistory(h);   // every entry was stale — reset the empty stack
   };
 
-  const checkRank = async () => {
-    const t = tag.trim();
-    if (!t) return;
-    setRankLoading(true);
-    try {
-      const info = await getRank(t);
-      setRankInfo(info);
-      if (info.found) {
-        setTag(info.tag);
-        localStorage.setItem("bsdraft.tag", info.tag);
-        // Warm here too, not just in the effect below: re-LOADing the SAME tag leaves personalTag
-        // (a string dep) unchanged, so the effect won't re-fire — but a server-side data refresh
-        // may have gone cold-cache since, and LOAD is a natural "about to draft" signal.
-        warmPersonal(info.tag);
-      }
-    } catch {
-      setRankInfo({ found: false, tag: t, tier: null, tier_label: null, bracket: null, source: null, error: "lookup failed" });
-    } finally {
-      setRankLoading(false);
-    }
-  };
+  const checkRank = () => lookupRank(tag);
 
-  const clearTag = () => {
-    setTag("");
-    setRankInfo(null);
-    localStorage.removeItem("bsdraft.tag");
-  };
+  const clearTag = () => changeTag("");
 
-  // Auto-refresh the player's live rank on every map switch. A new map usually means a new game, and
-  // rank can drift between games — a promotion, or a boot-time lookup that fell back to a stale
-  // dataset tier (rank resolution is live-first). Forgetting to hit LOAD then leaves you drafting at
-  // the wrong bracket. Gentle on purpose: it updates only on a positive hit, so a transient live
-  // failure keeps the last known rank instead of wiping it. Skips the first map load — boot already
-  // resolved the saved tag.
+  // Refresh only the loaded account, never an unsubmitted tag being typed in the input.
   const didInitMap = useRef(false);
   useEffect(() => {
     if (!mapId) return;
     if (!didInitMap.current) { didInitMap.current = true; return; }
-    const t = tag.trim();
+    const t = accountTagRef.current;
     if (!t) return;
-    let cancelled = false;
-    getRank(t)
-      .then((info) => {
-        if (cancelled || !info.found) return;
-        setRankInfo(info);
-        setTag(info.tag);
-        localStorage.setItem("bsdraft.tag", info.tag);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-    // Fires on map switches only; it intentionally reads the current tag without re-subscribing on
-    // every keystroke in the tag box.
+    const request = lookupRank(t, true);
+    return () => request?.cancel();
   }, [mapId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
@@ -1402,9 +1429,14 @@ export default function DraftBoard() {
         </section>
       )}
 
-      <RankWidget tag={tag} setTag={setTag} rankInfo={rankInfo} loading={rankLoading} onCheck={checkRank} onClear={clearTag} />
+      <RankWidget tag={tag} setTag={changeTag} rankInfo={rankInfo} loading={rankLoading} onCheck={checkRank} onClear={clearTag} />
 
-      {err && <div className="panel px-3 py-2 mb-3 mono text-[12px]" style={{ borderColor: "var(--red)", color: "var(--red)" }}>◇ {err}</div>}
+      {displayErr && <div role="alert" className="panel px-3 py-2 mb-3 mono text-[12px]" style={{ borderColor: "var(--red)", color: "var(--red)" }}>◇ {displayErr}</div>}
+      {roster?.loaded && roster.stale && (
+        <div role="status" className="panel px-3 py-2 mb-3 mono text-[11px]" style={{ color: "var(--gold)" }} title={roster.error || undefined}>
+          ⚠ Roster refresh failed — using the last loaded roster for {roster.name || "your account"}. Retrying on the next refresh.
+        </div>
+      )}
       {meta?.shifted && <MetaBanner meta={meta} />}
 
       <div className="mb-3">
@@ -1468,7 +1500,7 @@ export default function DraftBoard() {
                   // no "your seat's turn" — the personalized column in the rail covers you instead.
                   <div className="mt-3 space-y-1.5">
                     <div className="mono text-[10px] text-[var(--muted)]">🙈 ENEMY HIDDEN AT DIAMOND · PICKS OPTIMIZE YOUR OWN COMP.</div>
-                    {roster?.error && (
+                    {!roster?.loaded && roster?.error && (
                       <div className="mono text-[9px]" style={{ color: "var(--red)" }} title={roster.error}>
                         ⚠ {rosterFailReason(roster.error)}
                       </div>
@@ -1634,7 +1666,7 @@ export default function DraftBoard() {
             {dualCols && (
               <PickColumns general={pickList} generalReady={!!recs}
                 personal={personalRecs ? (personalRecs.picks || []) : null}
-                personalError={roster?.error ? rosterFailReason(roster.error) : personalErr}
+                personalError={!roster?.loaded && roster?.error ? rosterFailReason(roster.error) : personalErr}
                 name={roster?.name} byId={byId} onPlace={place} />
             )}
 

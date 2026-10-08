@@ -1,27 +1,21 @@
-"""Train and evaluate the win-probability model.
+"""Train candidates on chronological train/selection splits, evaluate once on a later test.
 
-    PYTHONPATH=backend python backend/scripts/train.py --epochs 40
-
-Trains on masked drafts: each epoch every match is re-masked — kept as the full 3v3 with
-probability --p-full, otherwise cut down to a random partial draft state (k_a, k_b known
-picks per side), unknown slots set to the trained mask row. The model therefore scores
-unfinished drafts directly, marginalizing over how real drafts continued.
-
-Compares against baselines (always-0.5 and logistic regression on brawler presence),
-reports log-loss / accuracy / AUC / ECE on a held-out split — both on full comps
-(comparable across retrains) and per partial draft state — saves the model + config to
-data/processed/winprob.pt, and writes calibration + training-curve charts to docs/.
-
-With --candidates N > 1 it trains N models (seeds seed..seed+N-1) on the SAME split and
-keeps the one with the lowest full-comp val logloss (best-of-N). The no-regression gate is
-applied to the winner only. This exists because the paired full-comp delta swings more
-between seeds (~0.0035, measured) than the 0.002 gate, so a single unattended retrain passes
-or fails by luck; best-of-N reliably surfaces a candidate at or below the incumbent.
+Production requires the downloaded released NPZ and a persisted, read-back dataset reservation.
+Early stopping and best-of-N selection never read the final test. The publication gate compares
+candidate and actual incumbent on identical final-test rows, using each model's pinned vocabulary.
+A failed attempt still consumes its test snapshot; later runs need at least 1,000 newer rows.
+Metrics include calibration and partial-draft diagnostics. These are reported rather than
+inventing unvalidated hard AUC/ECE or single-pick thresholds. Research runs can omit the incumbent,
+but their artifacts cannot pass the separate publisher checks.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
 import matplotlib
 import numpy as np
@@ -33,11 +27,14 @@ from sklearn.metrics import log_loss, roc_auc_score
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from bsdraft.constants import PROCESSED_DIR, REPO_ROOT  # noqa: E402
+from bsdraft.constants import PROCESSED_DIR, REPO_ROOT, RAW_DIR  # noqa: E402
 from bsdraft.data.balance_eras import current_balance_era  # noqa: E402
 from bsdraft.data import dataset as D  # noqa: E402
 from bsdraft.data import encoders as E  # noqa: E402
 from bsdraft.models.winprob import ModelConfig, WinProbNet  # noqa: E402
+
+from bsdraft.models import evaluation as EV
+from bsdraft.models.releases import sha256_file
 
 DOCS = REPO_ROOT / "docs"
 
@@ -94,7 +91,7 @@ def brawler_diff_features(team_a: np.ndarray, team_b: np.ndarray, n_brawlers: in
 
 
 def _train_candidate(seed: int, cfg: ModelConfig, args, shared: dict) -> dict:
-    """Train one masked model at ``seed`` and score it on the SHARED held-out split.
+    """Train one masked model at ``seed`` and score it on the SHARED selection split.
 
     Returns the fitted (best-epoch) model plus its full-comp val metrics and training curves.
     Deliberately does no artifact writing, no gate check, and no partial-state eval — the caller
@@ -140,7 +137,7 @@ def _train_candidate(seed: int, cfg: ModelConfig, args, shared: dict) -> dict:
             loss.backward()
             opt.step()
         model.eval()
-        with torch.no_grad():
+        with torch.no_grad(), EV.serving_map_context(model, shared["map_train_rows"]):
             pv_mix = torch.sigmoid(model(tam_v, tbm_v, mp[vai], mo[vai])).numpy()
             pv_full = torch.sigmoid(model(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
         vll = log_loss(yv, pv_mix, labels=[0, 1])
@@ -156,7 +153,7 @@ def _train_candidate(seed: int, cfg: ModelConfig, args, shared: dict) -> dict:
 
     model.load_state_dict(best_state)
     model.eval()
-    with torch.no_grad():
+    with torch.no_grad(), EV.serving_map_context(model, shared["map_train_rows"]):
         pv = torch.sigmoid(model(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
         pv_mix = torch.sigmoid(model(tam_v, tbm_v, mp[vai], mo[vai])).numpy()
     return {
@@ -175,7 +172,19 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--val-frac", type=float, default=0.15)
+    ap.add_argument("--val-frac", type=float, default=0.15, help="chronological selection fraction")
+    ap.add_argument("--test-frac", type=float, default=0.15, help="final chronological test fraction")
+    ap.add_argument("--min-test-rows", type=int, default=1000)
+    ap.add_argument("--incumbent-npz", type=Path, help="downloaded released model, never a local .pt")
+    ap.add_argument("--require-incumbent", action="store_true", help="fail closed for publication")
+    ap.add_argument("--allow-legacy-incumbent", action="store_true",
+                    help="one-time explicit migration: incumbent training/test overlap is unknown")
+    ap.add_argument("--matches", type=Path, default=RAW_DIR / "matches.jsonl")
+    ap.add_argument("--output-dir", type=Path, default=PROCESSED_DIR)
+    ap.add_argument("--metrics", type=Path, default=DOCS / "metrics.json")
+    ap.add_argument("--no-charts", action="store_true")
+    ap.add_argument("--evaluation-reservation", type=Path,
+                    help="read-back reservation of this dataset from the persistent attempt ledger")
     ap.add_argument("--halflife-days", type=float, default=30.0)
     ap.add_argument("--all-eras", action="store_true",
                     help="explicit research/backtest mode: train on pre-balance history too")
@@ -202,17 +211,16 @@ def main() -> None:
                          "unmasked control while matching 0.5's partial-state quality; raise "
                          "it if the paired full-comp gate ever regresses")
     ap.add_argument("--max-full-delta", type=float, default=0.002,
-                    help="hard gate: abort (exit 1, no artifacts written) if full-comp val "
-                         "logloss exceeds the previous checkpoint's by more than this on the "
+                    help="hard gate: abort (exit 1, no artifacts written) if full-comp test "
+                         "logloss exceeds the released incumbent's by more than this on the "
                          "same rows — keeps the unattended --retrain-on-shift path from "
                          "publishing a regressed model. Set <0 to disable.")
     ap.add_argument("--seed", type=int, default=0,
-                    help="base RNG seed. The train/val split is fixed by this seed; with "
-                         "--candidates N the models use seeds seed..seed+N-1 but all share "
-                         "that one split, so their full-comp val logloss is comparable.")
+                    help="base RNG seed for weight initialization and masks; candidates share "
+                         "the same chronological selection split.")
     ap.add_argument("--candidates", type=int, default=1,
                     help="best-of-N: train this many models (seeds seed..seed+N-1) on the SAME "
-                         "split and keep the lowest full-comp val logloss; the gate is applied to "
+                         "selection split and keep the lowest selection logloss; the test gate is applied to "
                          "the winner only. The paired full-comp delta swings more between seeds "
                          "(~0.0035) than the 0.002 gate, so a single unattended retrain passes or "
                          "fails by luck — the crawler's --retrain-on-shift path uses N>1 to fix "
@@ -237,138 +245,115 @@ def main() -> None:
     else:
         analysis_start_ts, analysis_era_id = 0, ""
 
-    # Seeds the shared split below (np.random.permutation). Per-candidate weight init and mask
-    # draws are seeded inside _train_candidate, so N=1 reproduces the old single-seed run exactly.
-    np.random.seed(args.seed)
+    if args.require_incumbent and args.min_test_rows < 1000:
+        raise SystemExit("publication requires at least 1000 final-test rows")
+    if args.require_incumbent and (args.max_full_delta < 0 or not np.isfinite(args.max_full_delta)):
+        raise SystemExit("--require-incumbent cannot disable the regression gate")
+    if args.require_incumbent and (not era or analysis_start_ts != era.start_ts or analysis_era_id != era.id):
+        raise SystemExit("publication training must use the active balance era")
+    try:
+        incumbent, incumbent_evaluation, incumbent_sha = EV.load_incumbent(
+            args.incumbent_npz, required=args.require_incumbent,
+            allow_legacy=args.allow_legacy_incumbent)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"unusable released incumbent: {exc}") from exc
 
-    ds = D.build_dataset(min_ts=analysis_start_ts)
+    dataset_digest = sha256_file(args.matches)
+    reservation = json.loads(args.evaluation_reservation.read_text()) if args.evaluation_reservation else None
+    if args.require_incumbent and reservation is None:
+        raise SystemExit("publication requires --evaluation-reservation from the persistent attempt ledger")
+    if reservation is not None and (reservation.get("dataset_sha256") != dataset_digest or
+                                    not reservation.get("reservation_id")):
+        raise SystemExit("evaluation reservation belongs to a different dataset")
+    test_after = max(int(incumbent_evaluation.get("data_through_ts", 0)),
+                     int(reservation.get("test_after_ts", 0)) if reservation else 0)
+    ds = D.build_dataset(path=args.matches, min_ts=analysis_start_ts)
+    if reservation is not None and int(reservation.get("consumed_through_ts", 0)) != int(ds.ts.max()):
+        raise SystemExit("dataset timestamp does not match the reserved evaluation snapshot")
     n = len(ds)
     print(f"dataset ({analysis_era_id or 'all eras'}): {D.summary(ds)}")
-    if n < 200:
-        print("Not enough labeled data yet — let the crawl collect more, then retrain.")
-        return
-
+    try:
+        tr_i, selection_i, test_i = EV.temporal_split(
+            ds.ts, selection_frac=args.val_frac, test_frac=args.test_frac,
+            previous_data_through_ts=test_after,
+            min_test=args.min_test_rows)
+        for name, rows in (("train", tr_i), ("selection", selection_i), ("test", test_i)):
+            if set(np.unique(ds.y[rows])) != {0, 1}:
+                raise ValueError(f"{name} split needs both outcome classes")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"temporal split: train={len(tr_i)}, selection={len(selection_i)}, test={len(test_i)}")
     ta, tb = torch.tensor(ds.team_a), torch.tensor(ds.team_b)
     mp, mo = torch.tensor(ds.map_idx), torch.tensor(ds.mode_idx)
     y = torch.tensor(ds.y)
-
-    # recency weights (time-decay, normalized to mean 1) — the "patch recency" lever
-    tmax = int(ds.ts.max())
-    if tmax > 0:
-        w = np.power(0.5, (tmax - ds.ts) / (args.halflife_days * 86400.0)).astype(np.float32)
-        w = w / w.mean()
+    # The training anchor and weights use only training rows, never final-test timestamps.
+    if args.halflife_days > 0:
+        w = np.power(0.5, (int(ds.ts[tr_i].max()) - ds.ts[tr_i]) /
+                     (args.halflife_days * 86400.0)).astype(np.float32)
+        w /= w.mean()
     else:
-        w = np.ones(n, dtype=np.float32)
-    wt = torch.tensor(w)
-
-    idx = np.random.permutation(n)   # split fixed by args.seed, shared across all candidates
-    n_val = int(n * args.val_frac)
-    val_i, tr_i = idx[:n_val], idx[n_val:]
-    vai, tri = torch.tensor(val_i), torch.tensor(tr_i)
-    yv = ds.y[val_i]
-
-    # --- baselines (seed-independent given the split) ---
-    const_ll = log_loss(yv, np.full_like(yv, 0.5), labels=[0, 1])
-    x_tr = brawler_diff_features(ds.team_a[tr_i], ds.team_b[tr_i], E.num_brawlers())
-    x_va = brawler_diff_features(ds.team_a[val_i], ds.team_b[val_i], E.num_brawlers())
-    logreg = LogisticRegression(max_iter=2000, C=1.0)
-    logreg.fit(x_tr, ds.y[tr_i])
-    p_lr = logreg.predict_proba(x_va)[:, 1]
-    lr_ll, lr_auc = log_loss(yv, p_lr, labels=[0, 1]), roc_auc_score(yv, p_lr)
-    lr_acc = float(((p_lr > 0.5) == yv.astype(bool)).mean())
-
-    # --- paired no-regression baseline ---
-    # The previous checkpoint, evaluated on THIS run's val rows (full comps). Comparing
-    # against docs/metrics.json alone would mix data drift into the delta: that file was
-    # written on a different dataset snapshot and split.
-    baseline = None
-    prev_pt = PROCESSED_DIR / "winprob.pt"
-    if prev_pt.exists():
-        ck = torch.load(prev_pt, map_location="cpu", weights_only=True)
-        # Filter to current ModelConfig fields so a checkpoint written with a since-removed
-        # config key (e.g. a retired experimental term) still loads as the paired baseline.
-        pcfg = ModelConfig(**{k: v for k, v in ck["config"].items()
-                              if k in ModelConfig.__dataclass_fields__})
-        if (pcfg.num_brawlers, pcfg.num_maps, pcfg.num_modes) == (
-                E.num_brawlers(), E.num_maps(), E.num_modes()):
-            prev = WinProbNet(pcfg)
-            prev.load_state_dict(ck["state_dict"])
-            prev.eval()
-            with torch.no_grad():
-                pb = torch.sigmoid(prev(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
-            baseline = {
-                "logloss": float(log_loss(yv, pb, labels=[0, 1])),
-                "acc": float(((pb > 0.5) == yv.astype(bool)).mean()),
-                "auc": float(roc_auc_score(yv, pb)),
-                "ece": float(expected_calibration_error(pb, yv)),
-            }
-        else:
-            print("previous winprob.pt was trained on a different vocabulary — skipping the "
-                  "paired baseline")
-
+        w = np.ones(len(tr_i), dtype=np.float32)
+    tri, vai = torch.tensor(tr_i), torch.tensor(selection_i)
     cfg = ModelConfig(E.num_brawlers(), E.num_maps(), E.num_modes(), mask_row=E.num_brawlers(),
                       class_synergy=args.class_synergy)
-
-    # Seed-independent tensors every candidate reuses; passed by reference, never mutated.
     shared = {
         "ta": ta, "tb": tb, "mp": mp, "mo": mo,
-        "tr_i": tr_i, "vai": vai, "yv": yv,
+        "tr_i": tr_i, "vai": vai, "yv": ds.y[selection_i],
         "ta_tr": ds.team_a[tr_i], "tb_tr": ds.team_b[tr_i],
-        "ta_val_np": ds.team_a[val_i], "tb_val_np": ds.team_b[val_i],
-        "y_tr": y[tri], "wt_tr": wt[tri], "mp_tr": mp[tri], "mo_tr": mo[tri],
+        "ta_val_np": ds.team_a[selection_i], "tb_val_np": ds.team_b[selection_i],
+        "y_tr": y[tri], "wt_tr": torch.tensor(w), "mp_tr": mp[tri], "mo_tr": mo[tri],
+        "map_train_rows": np.bincount(ds.map_idx[tr_i], minlength=E.num_maps()),
     }
-
-    # --- best-of-N: train candidates on the shared split, keep the lowest full-comp val logloss ---
-    n_cand = args.candidates
     candidates = []
-    for i in range(n_cand):
-        seed = args.seed + i
-        if n_cand > 1:
-            print(f"\n--- candidate {i + 1}/{n_cand} (seed {seed}) …")
-        c = _train_candidate(seed, cfg, args, shared)
-        candidates.append(c)
-        if n_cand > 1:
-            d = f"{c['m_ll'] - baseline['logloss']:+.4f}" if baseline else "n/a"
-            print(f"    full-comp val logloss {c['m_ll']:.4f}  (delta vs incumbent {d})")
-    best = min(candidates, key=lambda c: c["m_ll"])
-    if n_cand > 1:
-        lls = ", ".join(f"{c['m_ll']:.4f}" for c in candidates)
-        print(f"\n=== best-of-{n_cand}: chose seed {best['seed']} "
-              f"(full-comp val logloss {best['m_ll']:.4f}, lowest of [{lls}]) ===")
-
-    # Bind the winning candidate into the names the rest of the routine (report, gate, charts) uses.
-    model = best["model"]
-    pv = best["pv"]
-    m_ll, m_auc, m_acc, m_ece = best["m_ll"], best["m_auc"], best["m_acc"], best["m_ece"]
-    mix_ll = best["mix_ll"]
+    for index in range(args.candidates):
+        seed = args.seed + index
+        print(f"candidate {index + 1}/{args.candidates} (seed {seed})")
+        candidate = _train_candidate(seed, cfg, args, shared)
+        candidates.append(candidate)
+        print(f"selection full-comp logloss {candidate['m_ll']:.6f}")
+    best = min(candidates, key=lambda candidate: candidate["m_ll"])
+    model, chosen_seed = best["model"], best["seed"]
     history_mix, history_full = best["history_mix"], best["history_full"]
-    chosen_seed = best["seed"]
-
-    print("\n=== validation metrics, full comps (logloss/ECE: lower better; acc/AUC: higher better) ===")
-    print(f"{'model':<22}{'logloss':>10}{'acc':>8}{'AUC':>8}{'ECE':>8}")
-    print(f"{'always 0.5':<22}{const_ll:>10.4f}{0.5:>8.3f}{'-':>8}{'-':>8}")
-    print(f"{'logreg (brawlers)':<22}{lr_ll:>10.4f}{lr_acc:>8.3f}{lr_auc:>8.3f}{'-':>8}")
-    if baseline:
-        print(f"{'prev checkpoint':<22}{baseline['logloss']:>10.4f}{baseline['acc']:>8.3f}"
-              f"{baseline['auc']:>8.3f}{baseline['ece']:>8.3f}")
-    print(f"{'embedding net':<22}{m_ll:>10.4f}{m_acc:>8.3f}{m_auc:>8.3f}{m_ece:>8.3f}")
-    if baseline:
-        delta = m_ll - baseline["logloss"]
-        print(f"paired full-comp delta vs prev checkpoint (same val rows): "
-              f"logloss {delta:+.4f}  AUC {m_auc - baseline['auc']:+.4f}"
-              f"  — if logloss is up materially, raise --p-full or --candidates and retrain")
-        # Hard gate BEFORE any artifact is written. With best-of-N the gate judges the WINNER —
-        # if even the best of N candidates regressed past the threshold, publish nothing, so the
-        # unattended crawler path can't ratchet a regression in (this run's winprob.pt would
-        # otherwise become the next run's baseline).
-        if 0 <= args.max_full_delta < delta:
-            raise SystemExit(
-                f"full-comp regression gate: best-of-{n_cand} paired logloss delta {delta:+.4f} "
-                f"exceeds --max-full-delta {args.max_full_delta} — no artifacts written. "
-                f"Raise --p-full (more full-comp weight) or --candidates (more seeds) and retrain.")
+    n_cand = args.candidates
+    # Final test rows have never guided candidate/epoch selection.
+    val_i, n_val = test_i, len(test_i)
+    vai, yv = torch.tensor(test_i), ds.y[test_i]
+    with torch.no_grad(), EV.serving_map_context(model, shared["map_train_rows"]):
+        pv = torch.sigmoid(model(ta[vai], tb[vai], mp[vai], mo[vai])).numpy()
+    final = EV.metrics(yv, pv)
+    m_ll, m_auc, m_acc, m_ece = (final[key] for key in ("logloss", "auc", "acc", "ece"))
+    const_ll = EV.metrics(yv, np.full(len(yv), 0.5))["logloss"]
+    x_tr = brawler_diff_features(ds.team_a[tr_i], ds.team_b[tr_i], E.num_brawlers())
+    x_test = brawler_diff_features(ds.team_a[test_i], ds.team_b[test_i], E.num_brawlers())
+    logreg = LogisticRegression(max_iter=2000, C=1.0).fit(x_tr, ds.y[tr_i])
+    lr_metrics = EV.metrics(yv, logreg.predict_proba(x_test)[:, 1])
+    lr_ll, lr_auc, lr_acc = (lr_metrics[key] for key in ("logloss", "auc", "acc"))
+    by_brawler_row = {row: bid for bid, row in E.brawler_encoder().items()}
+    by_map_row = {0: 0, **{row: mid for mid, row in E.map_encoder().items()}}
+    by_mode_row = {0: "", **{row: mode for mode, row in E.mode_encoder().items()}}
+    baseline = None
+    if incumbent is not None:
+        baseline = EV.metrics(yv, EV.predict_incumbent(
+            incumbent, ds, test_i, brawler_ids=by_brawler_row,
+            map_ids=by_map_row, modes=by_mode_row))
+    try:
+        gate = EV.regression_gate(final, baseline, require_incumbent=args.require_incumbent,
+                                  max_full_delta=args.max_full_delta, incumbent_sha256=incumbent_sha)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    overlap = ("fresh_after_previous_snapshot" if incumbent_evaluation.get("data_through_ts") else
+               "unknown_legacy" if incumbent is not None else "no_incumbent")
+    gate["incumbent_test_overlap"] = overlap
+    print("final temporal-test metrics:", json.dumps(final, sort_keys=True))
+    print("paired publication gate:", json.dumps(gate, sort_keys=True))
+    mix_rng = np.random.default_rng(chosen_seed + 1)
+    va_m, vb_m = mask_teams(ds.team_a[test_i], ds.team_b[test_i], cfg.mask_row, args.p_full, mix_rng)
+    with torch.no_grad(), EV.serving_map_context(model, shared["map_train_rows"]):
+        mix_p = torch.sigmoid(model(torch.from_numpy(va_m), torch.from_numpy(vb_m), mp[vai], mo[vai])).numpy()
+    mix_ll = EV.metrics(yv, mix_p)["logloss"]
 
     # --- partial-draft states: how much is knowing more of the draft worth? ---
-    # Each row masks the whole val split to one fixed (known_ours, known_theirs) state.
+    # Each row masks the whole final test split to one fixed (known_ours, known_theirs) state.
     # The 1v0 row is also compared against a shrunk brawler-map winrate marginal built on the
     # train split — the cheapest possible single-pick predictor. If the net loses to it, the
     # mask-in-mean design is washing out the single-pick signal and needs rework.
@@ -381,14 +366,14 @@ def main() -> None:
     emp_wr = (wins + 5.0) / (games + 10.0)   # shrunk toward 0.5 with 10 pseudo-games
 
     partial_metrics = {"mixture_logloss": mix_ll, "p_full": args.p_full, "states": {}}
-    print("\n=== partial draft states, val (value of knowing more of the draft) ===")
+    print("\n=== partial draft states, final temporal test (value of knowing more of the draft) ===")
     print(f"{'state':<10}{'logloss':>10}{'AUC':>8}{'ECE':>8}{'mean|p-.5|':>12}")
     for ka, kb in ((1, 0), (1, 1), (2, 1), (2, 2), (3, 2), (3, 3)):
         srng = np.random.default_rng(chosen_seed + 100 + 10 * ka + kb)
         sa_np = mask_to_known(ds.team_a[val_i], ka, cfg.mask_row, srng)
         sb_np = mask_to_known(ds.team_b[val_i], kb, cfg.mask_row, srng)
         sa, sb = torch.from_numpy(sa_np), torch.from_numpy(sb_np)
-        with torch.no_grad():
+        with torch.no_grad(), EV.serving_map_context(model, shared["map_train_rows"]):
             ps = torch.sigmoid(model(sa, sb, mp[vai], mo[vai])).numpy()
         s_ll = float(log_loss(yv, ps, labels=[0, 1]))
         s_auc = float(roc_auc_score(yv, ps))
@@ -405,10 +390,10 @@ def main() -> None:
             partial_metrics["empirical_1v0_logloss"] = e_ll
             verdict = "net >= empirical marginal, OK" if s_ll <= e_ll else \
                 "NET LOSES to the empirical marginal — single-pick signal is being washed out"
-            print(f"{'  1v0 emp':<10}{e_ll:>10.4f}{'-':>8}{'-':>8}{'-':>12}   {verdict}")
+            print(f"{'  1v0 emp':<10}{e_ll:>10.4f}{'-':>8}{'-':>8}{'-':>12}   DIAGNOSTIC: {verdict}")
 
     # --- save artifacts ---
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     # The exact vocabulary this model was trained against, by embedding row. export_model.py
     # compares these ids to the live reference at export time — identity, not just counts, so
     # a same-size catalog swap between train and export fails loudly instead of silently
@@ -424,32 +409,58 @@ def main() -> None:
         "map_train_rows": [int(map_rows[r]) for _, r in
                            sorted(E.map_encoder().items(), key=lambda kv: kv[1])],
     }
+    trained_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    source_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+                                   check=True, capture_output=True, text=True).stdout.strip()
+    evaluation = {
+        "training_run_id": str(uuid.uuid4()), "trained_at": trained_at,
+        "source_commit": source_commit, "dataset_sha256": dataset_digest,
+        "source_dirty": bool(subprocess.run(["git", "status", "--porcelain", "--untracked-files=normal",
+                                             "--", "backend", ".github", "data/reference", "frontend"],
+                                            cwd=REPO_ROOT, check=True, capture_output=True, text=True).stdout.strip()),
+        "evaluation_reservation": reservation,
+        "data_through_ts": int(ds.ts.max()), "training_until_ts": int(ds.ts[tr_i].max()),
+        "selection_until_ts": int(ds.ts[selection_i].max()),
+        "test_start_ts": int(ds.ts[test_i].min()), "n_train": len(tr_i),
+        "n_selection": len(selection_i), "n_test": len(test_i), "n_total": n,
+        "split_method": "chronological; timestamp ties kept together; final test excluded from selection",
+        "publication_gate": gate, "embedding": final, "logreg": lr_metrics,
+        "const": {"logloss": float(const_ll)}, "embedding_partial": partial_metrics,
+        "baseline_released_incumbent": baseline,
+        "n_candidates": n_cand, "chosen_seed": chosen_seed,
+        "candidates": [{"seed": c["seed"], "selection_logloss": c["m_ll"]} for c in candidates],
+    }
+    if reservation is not None and reservation.get("source_commit") != source_commit:
+        raise SystemExit("source commit changed since evaluation reservation")
     torch.save({
         "state_dict": model.state_dict(),
         "config": cfg.to_dict(),
         "vocab": trained_vocab,
         "analysis": {"era_id": analysis_era_id, "start_ts": analysis_start_ts},
+        "evaluation": evaluation,
     },
-               PROCESSED_DIR / "winprob.pt")
+               args.output_dir / "winprob.pt")
     DOCS.mkdir(parents=True, exist_ok=True)
     metrics = {
-        "n_total": n, "n_val": int(n_val),
+        **evaluation, "n_val": int(n_val),
+        "analysis": {"era_id": analysis_era_id, "start_ts": analysis_start_ts},
+        "evaluation_kind": "final temporal test; not candidate selection",
         "const": {"logloss": float(const_ll)},
-        "logreg": {"logloss": float(lr_ll), "acc": lr_acc, "auc": float(lr_auc)},
+        "logreg": lr_metrics,
         "embedding": {"logloss": float(m_ll), "acc": m_acc, "auc": float(m_auc), "ece": m_ece},
         "embedding_partial": partial_metrics,
-        # Previous checkpoint scored on this run's val rows — the only drift-free comparison.
+        # Actual released incumbent scored on the identical final-test rows.
         "baseline_prev_checkpoint": baseline,
         # Best-of-N provenance: which seed shipped and how the candidates compared (empty deltas
         # when there was no paired baseline, e.g. after a vocabulary change).
         "n_candidates": n_cand,
         "chosen_seed": chosen_seed,
-        "analysis": {"era_id": analysis_era_id, "start_ts": analysis_start_ts},
-        "candidates": [{"seed": c["seed"], "logloss": c["m_ll"],
-                        "delta": (c["m_ll"] - baseline["logloss"]) if baseline else None}
-                       for c in candidates],
+        "candidates": evaluation["candidates"],
     }
-    (DOCS / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    args.metrics.parent.mkdir(parents=True, exist_ok=True)
+    args.metrics.write_text(json.dumps(metrics, indent=2, allow_nan=False))
+    if args.no_charts:
+        return
 
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
     ax[0].plot(history_mix, marker="o", ms=3, label="masked mixture")
@@ -468,11 +479,11 @@ def main() -> None:
     ax[1].set_title(f"calibration (ECE={m_ece:.3f})")
     ax[1].set_xlabel("predicted P(win)"); ax[1].set_ylabel("observed win-rate")
     fig.tight_layout()
-    fig.savefig(DOCS / "training.png", dpi=120)
+    fig.savefig(args.metrics.parent / "training.png", dpi=120)
 
-    print(f"\nsaved model  -> {PROCESSED_DIR / 'winprob.pt'}")
+    print(f"\nsaved model  -> {args.output_dir / 'winprob.pt'}")
     print(f"saved charts -> {DOCS / 'training.png'}")
-    print(f"saved metrics-> {DOCS / 'metrics.json'}")
+    print(f"saved metrics-> {args.metrics}")
 
 
 if __name__ == "__main__":

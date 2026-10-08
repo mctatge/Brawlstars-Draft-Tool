@@ -19,9 +19,10 @@ from typing import List, Optional, Tuple
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from bsdraft.api import schemas as S
-from bsdraft.collect.client import BrawlStarsClient, normalize_tag
+from bsdraft.collect.client import BrawlStarsClient, LiveProfiles, normalize_tag
 from bsdraft.config import settings
 from bsdraft.constants import RANKED_MODES
 from bsdraft.data.balance_eras import current_balance_era
@@ -43,6 +44,7 @@ from bsdraft.engine.stats import DraftStats, build_bracketed
 from bsdraft.engine.stats_store import load_stats
 from bsdraft.engine.tiers import BRACKETS, bracket_of_tier, is_mythic_plus, min_power_for_bracket, tier_label
 from bsdraft.models.serve import WinProbModel
+from bsdraft.models import bundles
 
 logger = logging.getLogger("bsdraft.api")
 
@@ -58,9 +60,30 @@ _personal_cache: dict = {} # tag -> (data_version, PersonalStats|None); rebuilt 
 _personal_locks: dict = {} # tag -> Lock; single-flights the per-tag dataset scan (no stampede)
 _personal_locks_guard = threading.Lock()
 _roster_cache: dict = {}   # normalized tag -> (fetched_at, RosterResponse); short TTL spares the live API
+_profiles = LiveProfiles()  # one cache/limiter for both live roster and rank
 _ROSTER_CACHE_MAX = 256    # hard bound so distinct tags can't grow the cache without limit
 
 _rank_cache: dict = {}     # normalized tag -> (fetched_at, RankResponse); short TTL on live rank lookups
+
+
+def _load_model():
+    bundled = bundles.load_current() if settings.model_manifest_url else None
+    if bundled is not None:
+        return bundled
+    try:
+        return WinProbModel(validate_current_era=True)
+    except Exception as exc:
+        logger.warning("local model rejected (%s); using empirical stats", type(exc).__name__)
+        # An absent path deliberately gives the neutral unavailable model.
+        return WinProbModel(sync.MODEL_PATH.parent / ".unavailable-model")
+
+
+def _sync_model():
+    if settings.model_manifest_url:
+        changed = bundles.refresh(settings.model_manifest_url)
+        if not bundles.status().get("missing") or bundles.load_current() is not None:
+            return changed
+    return sync.sync_model(settings.model_url) if settings.model_url else False
 
 
 def _build_stats():
@@ -143,111 +166,80 @@ def _plausible_tag(t: str) -> bool:
 
 
 def _personal_for(tag: Optional[str]):
-    """Cached personal stats for ``tag``, derived from the synced dataset (key-free, so it
-    works on the public host). Returns None when the tag is empty or implausible, or the
-    player has no labeled games in our data. A live battle-log augment can pre-seed a richer
-    entry at startup (see lifespan), which this cache then serves.
+    """Return recent cached history immediately; build misses in the bounded background pool.
 
-    A cached entry whose data version is behind is served AS-IS while a background rebuild
-    refreshes it (stale-while-revalidate). The refresh loop bumps ``_last_change`` every time
-    a dataset sync lands, which can happen mid-draft — and the client's /api/warm pings only
-    fire on tag/map changes, so nothing re-warms an invalidated tag until its next pick
-    request. Rebuilding inline there stalled that pick on the full dataset scan (~26 s on the
-    free tier, measured 2026-08-25); one refresh epoch of global data barely moves a single
-    player's record, so the stale entry is the better answer. Only a tag with no entry at
-    all — never scanned since boot — still builds inline.
-
-    Staleness is bounded, not open-ended: the background warm is best-effort (a full pool
-    skips it), so with nothing else this branch could serve the same aging entry forever —
-    e.g. under sustained /api/warm traffic pinning both slots. Once the entry's data version
-    lags the current one by more than ``_STALE_LAG_MAX_SECONDS`` we rebuild inline after all:
-    the deliberate staleness window is one-or-a-few 10-minute epochs, and an entry that far
-    behind means revalidation has been starved for many read attempts. (A lag that large can
-    also just mean a quiet night — no syncs between the entry's epoch and this morning's —
-    but that case is the pre-warm's job: the LOAD ping rebuilds or is mid-scan by pick time,
-    and the inline build here joins that scan via the single-flight lock.)"""
+    Roster readiness and ownership remain available while history warms. An occupied pool
+    never turns a new visitor into another full-file scan or a waiter on one.
+    """
     t = normalize_tag(tag or "")
     if not t or not _plausible_tag(t) or _engine is None:
         return None
     hit = _personal_cache.get(t)
-    if hit is not None:
-        if hit[0] == _last_change:
-            return hit[1]
-        if _last_change - hit[0] <= _STALE_LAG_MAX_SECONDS:
-            _warm_personal(t)   # revalidate off the critical path; serve the stale entry now
-            return hit[1]
-        logger.info("personal stats for %s lag %.0fs behind — rebuilding inline "
-                    "(background revalidation starved or never covered this tag)",
-                    t, _last_change - hit[0])
-    return _rebuild_personal(t)
+    if hit is not None and hit[0] == _last_change:
+        return hit[1]
+    _warm_personal(t)
+    if hit is not None and _last_change - hit[0] <= _STALE_LAG_MAX_SECONDS:
+        return hit[1]
+    return None
 
 
-def _rebuild_personal(t: str):
-    """Build ``t``'s cache entry from the dataset, blocking until done, and return the stats.
-    ``t`` must already be normalized and plausible, with the engine booted. Single-flight per
-    tag: a burst of builds for the same tag — rapid picks, the frontend re-polling, multiple
-    tabs, a warm racing a real request — waits on one scan instead of each launching its own
-    redundant one (a cache stampede; the cache is only written once the scan finishes)."""
-    with _personal_locks_guard:
-        if len(_personal_locks) > 512:   # bound growth — one tiny Lock per unique tag
-            # Drop only idle locks: wiping a HELD lock orphans it — its scan keeps running
-            # while the next request for that tag mints a fresh lock and starts a second
-            # concurrent full scan, breaking single-flight exactly when the box is busiest.
-            for k in [k for k, v in _personal_locks.items() if not v.locked()]:
-                del _personal_locks[k]
-        lock = _personal_locks.setdefault(t, threading.Lock())
-    with lock:
-        hit = _personal_cache.get(t)     # another thread may have built it while we waited
-        if hit is not None and hit[0] == _last_change:
-            return hit[1]
-        if len(_personal_cache) > 256:   # bound growth by evicting the oldest entry, not clear():
-            # a mass wipe let a batch of new tags cost every warm user their entry at once.
-            # list() snapshots atomically under the GIL, so concurrent inserts can't trip the pop.
-            _personal_cache.pop(next(iter(list(_personal_cache)), ""), None)
-        version = _last_change   # stamp the version the scan STARTED under: if a data refresh
-        # lands mid-scan we read the pre-refresh file to the end (the open handle keeps the old
-        # inode), so stamping the post-scan version would serve those stale stats as current for
-        # a whole data epoch. With the start version, the entry is born stale and rebuilt on use.
-        ps = build_personal_stats(
-            t,
-            fallback=_engine.stats,
-            analysis_start_ts=getattr(_engine.stats, "analysis_start_ts", 0),
-        )
-        _personal_cache[t] = (version, ps)
-        return ps
+def _rebuild_personal(t: str, extra_matches=None):
+    """Build at most two histories globally, and never wait behind another tag/build.
+
+    This bound also covers direct callers (including startup), rather than only /api/warm.
+    Per-tag locks remain single-flight; callers joining a running scan return without blocking.
+    """
+    if not _personal_build_slots.acquire(blocking=False):
+        return None
+    try:
+        with _personal_locks_guard:
+            if len(_personal_locks) > 512:
+                for k in [k for k, v in _personal_locks.items() if not v.locked()]:
+                    del _personal_locks[k]
+            lock = _personal_locks.setdefault(t, threading.Lock())
+            if not lock.acquire(blocking=False):
+                return None
+        try:
+            hit = _personal_cache.get(t)
+            if hit is not None and hit[0] == _last_change:
+                return hit[1]
+            if len(_personal_cache) >= 256:
+                _personal_cache.pop(next(iter(list(_personal_cache)), ""), None)
+            version = _last_change
+            ps = build_personal_stats(
+                t, fallback=_engine.stats, extra_matches=extra_matches,
+                analysis_start_ts=getattr(_engine.stats, "analysis_start_ts", 0),
+            )
+            _personal_cache[t] = (version, ps)
+            return ps
+        finally:
+            lock.release()
+    finally:
+        _personal_build_slots.release()
 
 
 # Cap how many personal-stats warms run at once. Each warm streams the full ``matches.jsonl`` to
 # filter one tag's games (seconds on the cloud dataset, on the free tier's CPU sliver), so an
 # unbounded thread-per-LOAD would let a burst of distinct tags — many drafters, or a bot hitting
 # /api/rank — spawn a scan pile-up that starves the box and can time out the health check. Warming
-# is best-effort (the pick phase rebuilds lazily on a miss), so a full pool skips rather than queues.
+# is best-effort (later best-effort warms retry a miss), so a full pool skips rather than queues.
 # 2 keeps a normal LOAD warm without saturating the instance; tune if needed.
 _WARM_MAX_CONCURRENCY = 2
 _warm_slots = threading.BoundedSemaphore(_WARM_MAX_CONCURRENCY)
+_personal_build_slots = threading.BoundedSemaphore(_WARM_MAX_CONCURRENCY)
 _warm_inflight: set = set()  # tags with a spawned warm worker; guarded by _personal_locks_guard
 
-# How far a cached entry's data version may lag the current one before _personal_for stops
-# serving it stale and rebuilds inline. Generous on purpose: the intended stale window is a
-# 10-minute refresh epoch or a few, and the ONLY way an entry honestly lags an hour of data
-# versions is that its background revalidation kept getting skipped (warm pool starved).
+# A recent cached history can serve during revalidation. Older history is omitted until the
+# bounded background rebuild completes, so pressure cannot force an unbounded foreground scan.
 _STALE_LAG_MAX_SECONDS = 3600.0
 
 
 def _warm_personal(tag: Optional[str]) -> None:
-    """Fire-and-forget: build this tag's personal stats off the critical path. The dataset scan
-    behind ``build_personal_stats`` takes seconds on the full cloud dataset, and it's deferred to
-    the pick phase (see the recommend handler), so a personalized seat's *first* pick would block
-    on it — the "analyzing…" stall. We know the tag much earlier: it's resolved when the player
-    hits LOAD (``/api/rank``). Warming here means the scan runs during the ban phase and the pick-1
-    request hits the warm cache. The single-flight lock in ``_rebuild_personal`` makes a
-    concurrent warm + real request share one scan, so this never doubles the work.
-    ``_personal_for`` also fires this when it serves a stale entry, so a data refresh landing
-    mid-draft revalidates in the background instead of stalling the next pick request.
+    """Warm history without blocking advice. Duplicate tags and a full pool no-op.
 
-    Bounded to ``_WARM_MAX_CONCURRENCY`` in-flight warms: when the pool is full this skips the warm
-    (the pick-phase build still covers the tag lazily) rather than piling scan threads onto the
-    free tier — the whole point of warming is to save latency, never to risk the box."""
+    /api/rank and /api/warm can start this before picks. Cold/stale pick reads also request
+    a warm; ownership and readiness still work while the history signal is unavailable.
+    """
     t = normalize_tag(tag or "")
     if (not t or not _plausible_tag(t) or _engine is None
             or _personal_cache.get(t, (None,))[0] == _last_change):
@@ -259,8 +251,7 @@ def _warm_personal(tag: Optional[str]) -> None:
     # alone races the window between Thread.start() and the worker actually acquiring the
     # lock (reproduced at ~15-30% with two concurrent stale reads, 2026-08-25), so a spawned-
     # worker registry (_warm_inflight) is written under the same guard that checks it. The
-    # locked() check stays as a best-effort catch for INLINE builds (a _rebuild_personal
-    # miss-path scan), which the registry doesn't see.
+    # locked() check also catches direct/startup builds, which the registry does not see.
     with _personal_locks_guard:
         if t in _warm_inflight:
             return
@@ -268,14 +259,15 @@ def _warm_personal(tag: Optional[str]) -> None:
         if lock is not None and lock.locked():
             return
         if not _warm_slots.acquire(blocking=False):
-            return  # warm pool full — skip; the stale/miss paths cover the tag lazily
+            return  # warm pool full — skip; a later request can retry warming
         _warm_inflight.add(t)
 
     def _run() -> None:
         try:
-            # Straight to the blocking build — going through _personal_for would hit its
-            # serve-stale branch and re-kick this warm instead of ever rebuilding.
+            # This worker owns a warm slot; the shared build bound also covers direct callers.
             _rebuild_personal(t)
+        except Exception as exc:
+            logger.warning("personal history warm failed (%s)", type(exc).__name__)
         finally:
             with _personal_locks_guard:
                 _warm_inflight.discard(t)
@@ -316,20 +308,16 @@ async def _refresh_loop() -> None:
                     logger.info("rank index artifact updated")
             # Refresh the empirical stats from their source: the published artifact (STATS_URL,
             # loaded — no in-memory rebuild) or, failing that, a local rebuild from the matches.
-            if settings.stats_url and _engine is not None:
-                if await loop.run_in_executor(None, sync.sync_stats, settings.stats_url):
-                    g, br = await loop.run_in_executor(None, _build_stats)
-                    _engine.stats, _engine.bracket_stats = g, br
-                    logger.info("draft stats reloaded: %d matches, %d bracket(s)", g.n, len(br))
-            elif data_changed and _engine is not None:
+            stats_changed = (await loop.run_in_executor(None, sync.sync_stats, settings.stats_url)
+                             if settings.stats_url and _engine is not None else False)
+            if _engine is not None and (stats_changed or (data_changed and
+                    (not settings.stats_url or _stats_source == "rebuild"))):
                 g, br = await loop.run_in_executor(None, _build_stats)
                 _engine.stats, _engine.bracket_stats = g, br
-                logger.info("draft stats rebuilt: %d matches, %d bracket(s)", g.n, len(br))
-            if settings.model_url and _engine is not None:
-                if await loop.run_in_executor(None, sync.sync_model, settings.model_url):
-                    _engine.model = await loop.run_in_executor(
-                        None, lambda: WinProbModel(validate_current_era=True)
-                    )  # atomic swap
+                logger.info("draft stats reloaded: %d matches, %d bracket(s)", g.n, len(br))
+            if (settings.model_url or settings.model_manifest_url) and _engine is not None:
+                if await loop.run_in_executor(None, _sync_model):
+                    _engine.model = await loop.run_in_executor(None, _load_model)
                     logger.info("win-prob model hot-swapped (available=%s)", _engine.model.available)
             # Item win-rate table: just refresh the file — the loadout loader reloads it on mtime
             # change per request, so there's no engine object to hot-swap.
@@ -349,8 +337,8 @@ async def lifespan(app: FastAPI):
     if settings.data_url:
         await loop.run_in_executor(None, sync.sync_matches, settings.data_url)
         _last_check = _last_change = time.time()
-    if settings.model_url:
-        await loop.run_in_executor(None, sync.sync_model, settings.model_url)
+    if settings.model_url or settings.model_manifest_url:
+        await loop.run_in_executor(None, _sync_model)
     if settings.stats_url:
         await loop.run_in_executor(None, sync.sync_stats, settings.stats_url)
     if settings.rank_index_url:
@@ -360,7 +348,7 @@ async def lifespan(app: FastAPI):
     if settings.itemstats_url:
         await loop.run_in_executor(None, sync.sync_itemstats, settings.itemstats_url)
     g, br = _build_stats()
-    _engine = DraftEngine(g, WinProbModel(validate_current_era=True), bracket_stats=br)
+    _engine = DraftEngine(g, _load_model(), bracket_stats=br)
     _dataset_count = await loop.run_in_executor(None, count_matches)  # headline count over the full dataset
     if settings.player_tag:
         ptag = normalize_tag(settings.player_tag)
@@ -371,18 +359,13 @@ async def lifespan(app: FastAPI):
                 # so local/home only); the public host falls back to dataset-derived stats.
                 try:
                     extra = matches_from_battlelog(await client.get_battlelog(ptag), ptag)
-                    _personal_cache[ptag] = (_last_change, build_personal_stats(
-                        ptag,
-                        fallback=_engine.stats,
-                        extra_matches=extra,
-                        analysis_start_ts=getattr(_engine.stats, "analysis_start_ts", 0),
-                    ))
+                    await loop.run_in_executor(None, _rebuild_personal, ptag, extra)
                 except Exception:
                     pass
         except Exception:
             _engine.roster, _engine.roster_name = None, ""
     task = None
-    if (settings.data_url or settings.model_url or settings.stats_url
+    if (settings.data_url or settings.model_url or settings.model_manifest_url or settings.stats_url
             or settings.rank_index_url or settings.meta_report_url or settings.itemstats_url
             ) and settings.refresh_seconds > 0:
         task = asyncio.create_task(_refresh_loop())
@@ -405,9 +388,25 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list,
 @app.get("/api/health")
 def health():
     era = current_balance_era()
-    return {
-        "status": "ok",
+    ready = bool(_engine and _engine.stats.n > 0)
+    newest_ts = 0
+    if settings.meta_report_url and sync.META_REPORT_PATH.exists():
+        try:
+            newest_ts = load_report(sync.META_REPORT_PATH).newest_ts
+        except Exception:
+            pass
+    age = max(0, int(time.time()) - newest_ts) if newest_ts else None
+    artifacts = sync.sync_status()
+    bundle_status = bundles.status() if settings.model_manifest_url else {}
+    if bundle_status:
+        artifacts["model bundle"] = bundle_status
+    degraded = any(value.get("error") for value in artifacts.values())
+    payload = {
+        "status": ("degraded" if degraded else "ok") if ready else "unavailable",
+        "ready": ready,
         "model": bool(_engine and _engine.model and _engine.model.available),
+        "model_identity": {k: v for k, v in model_status().items() if k in ("sha256", "release_id")},
+        "model_era": getattr(getattr(_engine, "model", None), "analysis_era_id", ""),
         "matches": _dataset_count or (_engine.stats.n if _engine else 0),
         "stats_source": _stats_source,
         "stats_n": _engine.stats.n if _engine else 0,
@@ -415,11 +414,31 @@ def health():
         "stats_start_ts": getattr(_engine.stats, "analysis_start_ts", 0) if _engine else 0,
         "current_era": era.id if era else "",
         "current_era_start_ts": era.start_ts if era else 0,
+        "newest_match_ts": newest_ts or None,
+        "data_age_seconds": age,
+        "data_stale": age > 6 * 3600 if age is not None else None,
+        "artifacts": artifacts,
         "roster": bool(_engine and _engine.roster),
         "refresh_seconds": settings.refresh_seconds if settings.data_url else 0,
         "last_check": _last_check or None,
         "last_change": _last_change or None,
     }
+    return JSONResponse(payload, status_code=200 if ready else 503)
+
+
+@app.get("/api/model")
+def model_status():
+    """Statistics for the exact loaded model; legacy artifacts have no verified evaluation."""
+    model = _engine.model if _engine else None
+    info = getattr(model, "release_info", {})
+    identity = sync.artifact_identity(sync.MODEL_PATH, sync._MODEL_SHA_PATH) if not info else {}
+    return {"available": bool(model and model.available),
+            "analysis_era_id": getattr(model, "analysis_era_id", ""),
+            "release_id": info.get("release_id"), "sha256": info.get("sha256", identity.get("sha256")),
+            "published_at": info.get("published_at"), "metrics": info.get("metrics"),
+            "evaluation_status": "verified_bundle" if info else "unavailable",
+            "note": None if info else "No evaluation report verified against the served weights. Historical reports are not current model metrics."}
+
 
 
 @app.get("/api/meta", response_model=S.MetaResponse)
@@ -434,7 +453,10 @@ def meta():
         try:
             rep = load_report(sync.META_REPORT_PATH)
         except Exception as e:  # noqa: BLE001 — a corrupt/old artifact must fall back, not 500
-            logger.warning("meta report load failed (%s); computing from matches", e)
+            logger.warning("meta report load failed (%s)", type(e).__name__)
+    if rep is None and settings.meta_report_url:
+        return S.MetaResponse(shifted=False, n_recent=0, n_prior=0,
+                              note="Meta report temporarily unavailable; current draft statistics remain active.")
     if rep is None:
         if _meta_cache is None or _meta_cache[0] != _last_change:
             _meta_cache = (_last_change, detect_drift())
@@ -539,6 +561,11 @@ def loadout(brawler: int, mode: str, map_id: Optional[int] = None, enemies: Opti
     return S.LoadoutResponse(**adv)
 
 
+class _LiveProfileAdapter:
+    async def get_player(self, tag):
+        return await _profiles.get(tag, client_factory=BrawlStarsClient)
+
+
 @app.get("/api/roster", response_model=S.RosterResponse)
 async def roster(tag: Optional[str] = None):
     """The given player's roster — owned brawlers, loadout completeness, and mastery — fetched
@@ -557,8 +584,7 @@ async def roster(tag: Optional[str] = None):
     if hit is not None and (time.time() - hit[0]) < settings.roster_ttl_seconds:
         return hit[1]
     try:
-        async with BrawlStarsClient() as client:
-            r, name = await mastery.fetch_roster(client, t)
+        r, name = await mastery.fetch_roster(_LiveProfileAdapter(), t)
         # Deliberately do NOT write r onto _engine. This is a read endpoint, and _engine is one
         # process-global DraftEngine shared by every request: persisting the fetched roster let
         # whichever tag last hit /api/roster become the engine default that _roster_for() folds
@@ -590,7 +616,8 @@ async def roster(tag: Optional[str] = None):
         _roster_cache[key] = (now, resp)
         return resp
     except Exception as e:  # noqa: BLE001
-        return S.RosterResponse(loaded=False, tag=t, name="", error=str(e))
+        return S.RosterResponse(loaded=False, tag=t, name="",
+                                error="Live roster lookup is temporarily unavailable. Try again shortly.")
 
 
 @app.post("/api/purchases", response_model=S.PurchasesResponse)
@@ -645,8 +672,7 @@ async def _live_rank(tag_n: str) -> Tuple[str, Optional[S.RankResponse]]:
     if hit is not None and (time.time() - hit[0]) < settings.roster_ttl_seconds:
         return hit[1]
     try:
-        async with BrawlStarsClient() as client:
-            player = await client.get_player(tag_n)
+        player = await _profiles.get(tag_n, client_factory=BrawlStarsClient)
         t = current_ranked_tier(player)
     except Exception:  # noqa: BLE001 — keyless/offline host, IP-lock 403, or API hiccup
         return ("unavailable", None)
@@ -720,8 +746,8 @@ async def warm(tag: str):
 
     No Mythic+ gate, unlike the /api/rank warm: blind-pick brackets send ``personal_tag`` too
     (the dual-column personal rail), so any resolvable tag is worth warming. Always returns
-    immediately — a full warm pool, unknown tag, or unbooted engine just means the pick-phase
-    build covers it lazily, exactly as before. Unauthenticated, so bounded twice: implausible
+    immediately — a full warm pool, unknown tag, or unbooted engine just means a later
+    request retries warming, exactly as before. Unauthenticated, so bounded twice: implausible
     tags (wrong length/alphabet — see ``_plausible_tag``) are dropped before spending anything,
     and at most ``_WARM_MAX_CONCURRENCY`` scans run in flight; extra requests no-op."""
     _warm_personal(normalize_tag(tag))

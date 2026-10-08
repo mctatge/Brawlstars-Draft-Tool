@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 
 import numpy as np
 import torch
 
-from bsdraft.constants import PROCESSED_DIR
+from bsdraft.constants import PROCESSED_DIR, REPO_ROOT
+from bsdraft.models.releases import sha256_file
 
 DEFAULT_PT = PROCESSED_DIR / "winprob.pt"
 DEFAULT_NPZ = PROCESSED_DIR / "winprob.npz"
@@ -113,7 +115,7 @@ def capability_regressions(prev_cfg: dict, prev_keys: Iterable[str],
     return lost
 
 
-def _previous_export(npz_path: Path) -> Tuple[Dict, Set[str]]:
+def _previous_export(npz_path: Path, *, required: bool = False) -> Tuple[Dict, Set[str]]:
     """``(config, array keys)`` of the artifact already at ``npz_path``.
 
     Returns empty values when there is no previous export or it cannot be read: a missing or
@@ -121,18 +123,44 @@ def _previous_export(npz_path: Path) -> Tuple[Dict, Set[str]]:
     capability downgrade, not to gate on the health of the file it is replacing.
     """
     if not npz_path.exists():
+        if required:
+            raise SystemExit(f"required incumbent export missing: {npz_path}")
         return {}, set()
     try:
-        with np.load(npz_path, allow_pickle=True) as z:
+        with np.load(npz_path, allow_pickle=False) as z:
             cfg = json.loads(str(z["_config"])) if "_config" in z.files else {}
             return cfg, set(z.files)
-    except Exception as e:  # noqa: BLE001 - see docstring: never block on a bad predecessor
+    except Exception as e:  # noqa: BLE001 - explicit research mode can replace a corrupt local export
+        if required:
+            raise SystemExit(f"required incumbent export unreadable: {e}") from e
         print(f"note: could not read {npz_path} for the capability check ({e}) - skipping it")
         return {}, set()
 
 
-def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False) -> None:
+def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False, *,
+           incumbent_path: Path | None = None, require_incumbent: bool = False,
+           metrics_path: Path | None = None) -> None:
     ckpt = torch.load(pt_path, map_location="cpu", weights_only=True)
+    evaluation = ckpt.get("evaluation", {})
+    report = None
+    if require_incumbent:
+        if incumbent_path is None or allow_downgrade:
+            raise SystemExit("publication export requires the released incumbent and disallows capability downgrades")
+        gate = evaluation.get("publication_gate", {})
+        if not gate.get("passed") or not gate.get("require_incumbent"):
+            raise SystemExit("checkpoint did not pass the mandatory released-incumbent gate")
+        if gate.get("incumbent_sha256") != sha256_file(incumbent_path):
+            raise SystemExit("incumbent changed between evaluation and export")
+    if metrics_path is not None:
+        report = json.loads(metrics_path.read_text())
+        if not evaluation.get("training_run_id") or report.get("training_run_id") != evaluation["training_run_id"]:
+            raise SystemExit("metrics and checkpoint belong to different training runs")
+        if any(report.get(key) != value for key, value in evaluation.items()):
+            raise SystemExit("metrics evaluation metadata differs from the checkpoint")
+        if report.get("analysis") != ckpt.get("analysis"):
+            raise SystemExit("metrics analysis era differs from the checkpoint")
+    elif require_incumbent:
+        raise SystemExit("publication export requires matching --metrics")
     weights = {k: v.detach().cpu().numpy() for k, v in ckpt["state_dict"].items()}
     vocab = _vocab()
     # The vocab is pinned from the LIVE reference, but the checkpoint was trained against the
@@ -172,7 +200,8 @@ def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False) -> None
     # capability_regressions). This is the last check before the write, so a downgrade is
     # caught whether it came from a missing training flag, a rolled-back config, or a
     # checkpoint from an older code path.
-    prev_cfg, prev_keys = _previous_export(npz_path)
+    comparison_path = incumbent_path if incumbent_path is not None else npz_path
+    prev_cfg, prev_keys = _previous_export(comparison_path, required=require_incumbent)
     lost = capability_regressions(prev_cfg, prev_keys, cfg,
                                   set(weights) | set(vocab) | {"_config"})
     if lost:
@@ -180,7 +209,7 @@ def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False) -> None
         if not allow_downgrade:
             raise SystemExit(
                 f"refusing to export: this checkpoint drops capabilities that the model "
-                f"already at {npz_path} has:\n{detail}\n\n"
+                f"already at {comparison_path} has:\n{detail}\n\n"
                 f"Retrain with the flag that produces them (the unattended path in "
                 f"backend/scripts/collect.py pins --class-synergy), or pass "
                 f"--allow-capability-downgrade if the removal is deliberate.")
@@ -190,8 +219,26 @@ def export(pt_path: Path, npz_path: Path, allow_downgrade: bool = False) -> None
     # an old all-era model after the live balance boundary advances. Older checkpoints have no
     # metadata and are intentionally treated as legacy.
     analysis = ckpt.get("analysis", {})
-    np.savez(npz_path, _config=np.array(json.dumps(cfg)),
-             _analysis=np.array(json.dumps(analysis)), **weights, **vocab)
+    npz_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=npz_path.parent, suffix=".npz", delete=False) as handle:
+        staged = Path(handle.name)
+    try:
+        np.savez(staged, _config=np.array(json.dumps(cfg)),
+                 _analysis=np.array(json.dumps(analysis)),
+                 _evaluation=np.array(json.dumps(evaluation, allow_nan=False)), **weights, **vocab)
+        if report is not None:
+            report["weights_sha256"] = sha256_file(staged)
+            report["model"] = {
+                "parameters": sum(int(value.size) for key, value in weights.items() if key != "brawler_class"),
+                "config": cfg, "pinned_maps": len(vocab["_vocab_map_ids"]),
+                "tensor_shapes": {key: list(value.shape) for key, value in weights.items()},
+            }
+            report_staged = metrics_path.with_name(metrics_path.name + ".tmp")
+            report_staged.write_text(json.dumps(report, indent=2, allow_nan=False))
+            report_staged.replace(metrics_path)
+        staged.replace(npz_path)
+    finally:
+        staged.unlink(missing_ok=True)
     size_kb = npz_path.stat().st_size / 1024
     print(f"exported {pt_path}  ->  {npz_path}  ({size_kb:.1f} KB, {len(weights)} tensors "
           f"+ pinned vocabulary)")
@@ -206,10 +253,15 @@ def main() -> None:
                          "has (a True config flag going False, or a weight array disappearing). "
                          "Off by default so an unattended retrain cannot silently ship a weaker "
                          "model; turn it on for a deliberate rollback.")
+    ap.add_argument("--incumbent-npz", type=Path, help="actual downloaded released incumbent")
+    ap.add_argument("--require-incumbent", action="store_true")
+    ap.add_argument("--metrics", type=Path, help="metrics from the same training run; bind to exported bytes")
     args = ap.parse_args()
     if not args.pt.exists():
         raise SystemExit(f"No checkpoint at {args.pt}. Train first: scripts/train.py")
-    export(args.pt, args.npz, allow_downgrade=args.allow_capability_downgrade)
+    export(args.pt, args.npz, allow_downgrade=args.allow_capability_downgrade,
+           incumbent_path=args.incumbent_npz, require_incumbent=args.require_incumbent,
+           metrics_path=args.metrics)
 
 
 if __name__ == "__main__":

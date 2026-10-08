@@ -3,7 +3,7 @@ name: retrain-model
 # Heavy model retraining runs here instead of on the home crawler Mac. The crawler still owns
 # collection/publishing because the Supercell key is IP-allowlisted; this workflow downloads the
 # published dataset, trains with the production unattended flags, exports the NumPy serve artifact,
-# and uploads only winprob.npz when every gate passes.
+# and promotes an immutable model/metrics bundle only when every gate passes.
 
 on:
   workflow_dispatch:
@@ -12,6 +12,10 @@ on:
         description: Why this retrain was requested
         required: false
         default: manual
+      allow_legacy_incumbent:
+        description: One-time bootstrap only; acknowledge unknown legacy incumbent test overlap
+        type: boolean
+        default: false
       report_fingerprint:
         description: Meta-drift fingerprint from the local crawler, if any
         required: false
@@ -34,6 +38,7 @@ jobs:
       PYTHONPATH: backend
       RETRAIN_REASON: ${{ inputs.reason || 'manual' }}
       REPORT_FINGERPRINT: ${{ inputs.report_fingerprint || '' }}
+      ALLOW_LEGACY_INCUMBENT: ${{ inputs.allow_legacy_incumbent || false }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
@@ -46,7 +51,14 @@ jobs:
       - name: Install training dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r backend/requirements-dev.txt
+
+      - name: Verify training and serving safeguards
+        run: python -m pytest backend/tests/test_training_safeguards.py backend/tests/test_model_publication.py backend/tests/test_partial_draft.py backend/tests/test_export_capability_guard.py -q
+
+      - name: Download actual released incumbent
+        run: python backend/scripts/download_incumbent.py --repository "$GH_REPO" --output "$RUNNER_TEMP/incumbent.npz"
 
       - name: Download published match dataset
         run: |
@@ -63,11 +75,25 @@ jobs:
           PY
           df -h .
 
+      - name: Reserve final-test snapshot before training
+        run: |
+          set -euo pipefail
+          LEGACY_ARGS=()
+          if [ "$ALLOW_LEGACY_INCUMBENT" = "true" ]; then LEGACY_ARGS+=(--allow-legacy-incumbent); fi
+          python backend/scripts/reserve_evaluation.py --repository "$GH_REPO" \
+            --matches data/raw/matches.jsonl --incumbent-npz "$RUNNER_TEMP/incumbent.npz" \
+            --output "$RUNNER_TEMP/evaluation-reservation.json" "${LEGACY_ARGS[@]}"
+
       - name: Train, export, and publish model
         run: |
           set -euo pipefail
-          python backend/scripts/train.py --class-synergy --candidates 3 --max-full-delta 0.0035
-          python backend/scripts/export_model.py
+          LEGACY_ARGS=()
+          if [ "$ALLOW_LEGACY_INCUMBENT" = "true" ]; then LEGACY_ARGS+=(--allow-legacy-incumbent); fi
+          python backend/scripts/train.py --class-synergy --candidates 3 --max-full-delta 0.0035 \
+            --incumbent-npz "$RUNNER_TEMP/incumbent.npz" --require-incumbent \
+            --evaluation-reservation "$RUNNER_TEMP/evaluation-reservation.json" "${LEGACY_ARGS[@]}"
+          python backend/scripts/export_model.py --incumbent-npz "$RUNNER_TEMP/incumbent.npz" \
+            --require-incumbent --metrics docs/metrics.json
           python -m bsdraft.collect.publish --only-model
 
       - name: Close stale retrain issue after success
@@ -95,19 +121,18 @@ jobs:
           TITLE="Remote model retrain failed"
           BODY="$RUNNER_TEMP/model-stale.md"
           {
-            echo "The GitHub Actions model retrain did not publish a new \`winprob.npz\`."
+            echo "The GitHub Actions model retrain did not complete publication of a verified model bundle."
             echo
             echo "- Run: ${RUN_URL}"
             echo "- Reason: \`${RETRAIN_REASON}\`"
             echo "- Drift fingerprint: \`${REPORT_FINGERPRINT:-none}\`"
             echo
-            echo "The release asset was left untouched. Most failures are the full-comp regression gate in \`train.py\`, a capability-downgrade refusal in \`export_model.py\`, or a release upload/auth issue."
+            echo "Existing immutable model assets were retained. The manifest is promoted only after uploaded files verify; check its readback if failure occurred during promotion. Most failures are the full-comp regression gate in \`train.py\`, a capability-downgrade refusal in \`export_model.py\`, or a release upload/auth issue."
             echo
             echo "Production command:"
             echo
             echo '```bash'
-            echo "PYTHONPATH=backend python backend/scripts/train.py --class-synergy --candidates 3 --max-full-delta 0.0035"
-            echo "PYTHONPATH=backend python backend/scripts/export_model.py"
+            echo "See this run for the mandatory released-incumbent train/export commands. A legacy incumbent requires an explicit one-time bootstrap dispatch."
             echo "PYTHONPATH=backend python -m bsdraft.collect.publish --only-model"
             echo '```'
           } > "$BODY"

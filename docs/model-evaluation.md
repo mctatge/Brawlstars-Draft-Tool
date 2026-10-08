@@ -1,5 +1,10 @@
 # Model Evaluation — How the draft signals are weighted, and whether that should change
 
+This document records historical signal-weight ablations. Its AUC, sample counts and blend
+comparisons do not describe the currently served neural weights. Current identity-bound
+metrics come from `/api/model`; the enforced retraining and publication protocol is in
+[reliability-and-publication.md](reliability-and-publication.md).
+
 The recommender fuses six signals into one pick score: a brawler's **map** win-rate, the
 learned **model** (win-prob net), pairwise **synergy** with allies, **counter** vs. revealed
 enemies, mode-based **role** fit, and player-specific **mastery**/**personal** history. The

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import weakref
 from typing import Any, Optional
 
 import httpx
@@ -78,14 +80,15 @@ class RateLimiter:
 class BrawlStarsClient:
     """Async API client. Use as an async context manager."""
 
-    def __init__(self, token: Optional[str] = None, rate_per_sec: Optional[float] = None):
+    def __init__(self, token: Optional[str] = None, rate_per_sec: Optional[float] = None,
+                 rate_limiter: Optional[RateLimiter] = None):
         self._token = token or settings.brawlstars_api_token
         if not self._token:
             raise RuntimeError(
                 "No API token. Set BRAWLSTARS_API_TOKEN in .env "
                 "(create a key at https://developer.brawlstars.com)."
             )
-        self._limiter = RateLimiter(rate_per_sec or settings.crawl_rate_limit_per_sec)
+        self._limiter = rate_limiter or RateLimiter(rate_per_sec or settings.crawl_rate_limit_per_sec)
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
             headers={
@@ -156,3 +159,80 @@ class BrawlStarsClient:
     async def get_brawlers(self) -> list:
         data = await self._get("/brawlers")
         return data.get("items", [])
+
+
+class LiveProfileUnavailable(RuntimeError):
+    """Safe public error: never includes credentials, upstream body, or request URLs."""
+
+
+class LiveProfiles:
+    """Bound live roster/rank lookups together, with cache and per-tag single-flight.
+
+    One event-loop limiter is shared by all cache misses. At most ``max_inflight`` profile
+    fetches can be pending, including time spent waiting for the rate limiter. The overall
+    deadline covers retry delays too. A brief auth circuit avoids retrying every tag during
+    the home host's recurring IP-lock outages. Each production worker has its own instance.
+    """
+    def __init__(self, *, deadline: float = 8.0, failure_ttl: float = 10.0,
+                 max_inflight: int = 8, max_cache: int = 256):
+        self.deadline = deadline
+        self.failure_ttl = failure_ttl
+        self.max_inflight = max_inflight
+        self.max_cache = max_cache
+        self._cache: dict = {}
+        self._states = weakref.WeakKeyDictionary()
+        self._auth_retry_at = 0.0
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._auth_retry_at = 0.0
+
+    async def get(self, tag: str, *, client_factory=None) -> dict:
+        key = normalize_tag(tag)
+        now = time.monotonic()
+        hit = self._cache.get(key)
+        if hit is not None and hit[0] > now:
+            if hit[1] is not None:
+                return hit[1]
+            raise LiveProfileUnavailable("Live player lookup is temporarily unavailable. Try again shortly.")
+        if now < self._auth_retry_at:
+            raise LiveProfileUnavailable("Live player lookup is temporarily unavailable. Try again shortly.")
+        loop = asyncio.get_running_loop()
+        state = self._states.setdefault(loop, {
+            "limiter": RateLimiter(settings.crawl_rate_limit_per_sec), "inflight": {}})
+        task = state["inflight"].get(key)
+        if task is None:
+            if len(state["inflight"]) >= self.max_inflight:
+                raise LiveProfileUnavailable("Live player lookup is busy. Try again shortly.")
+            task = loop.create_task(self._fetch(key, state, client_factory or BrawlStarsClient))
+            state["inflight"][key] = task
+        player = await asyncio.shield(task)
+        if player is None:
+            raise LiveProfileUnavailable("Live player lookup is temporarily unavailable. Try again shortly.")
+        return player
+
+    async def _fetch(self, key, state, client_factory):
+        async def request():
+            async with client_factory(rate_limiter=state["limiter"]) as client:
+                player = await client.get_player(key)
+                if not isinstance(player, dict):
+                    raise ValueError("invalid player profile")
+                return player
+        try:
+            player = await asyncio.wait_for(request(), timeout=self.deadline)
+            ttl = settings.roster_ttl_seconds
+        except Exception as exc:
+            player, ttl = None, self.failure_ttl
+            if isinstance(exc, AuthError):
+                self._auth_retry_at = time.monotonic() + self.failure_ttl
+            logger.warning("live profile lookup unavailable (%s)", type(exc).__name__)
+        finally:
+            state["inflight"].pop(key, None)
+        now = time.monotonic()
+        if len(self._cache) >= self.max_cache:
+            for old in [tag for tag, value in self._cache.items() if value[0] <= now]:
+                self._cache.pop(old, None)
+            if len(self._cache) >= self.max_cache:
+                self._cache.pop(next(iter(self._cache)))
+        self._cache[key] = (now + ttl, player)
+        return player

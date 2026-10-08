@@ -15,6 +15,11 @@ using the IP-locked Supercell key while the cloud stays free.
 from __future__ import annotations
 
 import argparse
+import json
+import math
+import os
+import tempfile
+from datetime import datetime, timezone
 import gzip
 import shutil
 import subprocess
@@ -31,6 +36,139 @@ RANK_INDEX_NPZ_PATH = PROCESSED_DIR / "rank_index.npz"       # current container
 META_REPORT_PATH = PROCESSED_DIR / "meta_report.json"
 ITEMSTATS_PATH = PROCESSED_DIR / "itemstats.json.gz"
 DEFAULT_TAG = "data-latest"
+METRICS_PATH = PROCESSED_DIR.parent.parent / "docs" / "metrics.json"
+from bsdraft.models.releases import POINTER_TAG, parse_manifest, sha256_file, validate_manifest
+
+
+def validate_model_bundle(model_path: Path, metrics_path: Path) -> dict:
+    report = json.loads(metrics_path.read_text())
+    import numpy as np
+    from bsdraft.data.balance_eras import current_balance_era
+    from bsdraft.models.evaluation import load_incumbent
+    with np.load(model_path, allow_pickle=False) as archive:
+        embedded = json.loads(archive["_evaluation"].item())
+        analysis = json.loads(archive["_analysis"].item())
+        required_evidence = {"training_run_id", "trained_at", "source_commit", "dataset_sha256", "source_dirty",
+                             "data_through_ts", "training_until_ts", "selection_until_ts", "test_start_ts",
+                             "n_train", "n_selection", "n_test", "n_total", "publication_gate",
+                             "evaluation_reservation", "embedding", "baseline_released_incumbent"}
+        if not isinstance(embedded, dict) or not required_evidence <= embedded.keys():
+            raise ValueError("model lacks complete publication evidence")
+        if any(report.get(key) != value for key, value in embedded.items()):
+            raise ValueError("model and report evaluation metadata mismatch")
+        if analysis != report.get("analysis"):
+            raise ValueError("model and report analysis mismatch")
+        cfg = json.loads(archive["_config"].item())
+        facts = report.get("model", {})
+        parameter_count = sum(int(archive[key].size) for key in archive.files
+                              if not key.startswith("_") and key != "brawler_class")
+        if (facts.get("config") != cfg or facts.get("parameters") != parameter_count or
+                facts.get("pinned_maps") != len(archive["_vocab_map_ids"])):
+            raise ValueError("reported model facts do not match the actual weights")
+    load_incumbent(model_path, required=True)
+    era = current_balance_era()
+    if era is None or analysis != {"era_id": era.id, "start_ts": era.start_ts}:
+        raise ValueError("publication requires the active balance era")
+    if report.get("source_dirty") is not False:
+        raise ValueError("publication requires a clean source checkout")
+    reservation = report.get("evaluation_reservation") or {}
+    if (not reservation.get("reservation_id") or
+            reservation.get("consumed_through_ts") != report.get("data_through_ts") or
+            reservation.get("dataset_sha256") != report.get("dataset_sha256") or
+            reservation.get("source_commit") != report.get("source_commit") or
+            report.get("test_start_ts", 0) <= reservation.get("test_after_ts", 0)):
+        raise ValueError("missing or inconsistent consumed-test reservation")
+    if report.get("n_total") != sum(report.get(key, 0) for key in ("n_train", "n_selection", "n_test")):
+        raise ValueError("inconsistent temporal split sample counts")
+    if report.get("data_through_ts", 0) < report.get("test_start_ts", 0):
+        raise ValueError("test starts beyond dataset snapshot")
+    if report.get("weights_sha256") != sha256_file(model_path):
+        raise ValueError("model and metrics digest mismatch")
+    gate = report.get("publication_gate", {})
+    if gate.get("passed") is not True or gate.get("require_incumbent") is not True:
+        raise ValueError("model did not pass the mandatory incumbent publication gate")
+    import re
+    if (not re.fullmatch(r"[0-9a-f]{64}", str(gate.get("incumbent_sha256", ""))) or
+            not isinstance(gate.get("delta"), (int, float))):
+        raise ValueError("missing paired incumbent comparison")
+    expected_delta = report["embedding"]["logloss"] - report["baseline_released_incumbent"]["logloss"]
+    if not math.isclose(gate["delta"], expected_delta, rel_tol=0, abs_tol=1e-12):
+        raise ValueError("paired delta does not match the reported final-test metrics")
+    threshold = gate.get("max_full_delta", -1)
+    if not math.isfinite(threshold) or threshold < 0 or not math.isfinite(gate["delta"]) or gate["delta"] > threshold:
+        raise ValueError("invalid or failed publication gate")
+    if report.get("n_test", 0) < 1000 or report.get("n_train", 0) < 100 or report.get("n_selection", 0) < 100:
+        raise ValueError("insufficient temporal evaluation sample")
+    if not (0 < report.get("training_until_ts", 0) < report.get("selection_until_ts", 0) < report.get("test_start_ts", 0)):
+        raise ValueError("training, selection and final test are not temporally separated")
+    for key in ("logloss", "auc", "ece"):
+        if not math.isfinite(report.get("embedding", {}).get(key, float("nan"))):
+            raise ValueError("missing finite final-test metrics")
+    return report
+
+
+def _checked_gh(*args: str):
+    result = _gh(*args)
+    if result.returncode:
+        raise RuntimeError(f"gh {' '.join(args[:3])} failed: {result.stderr.strip()}")
+    return result
+
+
+def _verify_release_bundle(tag: str, model_digest: str, metrics_digest: str) -> None:
+    # Download the uploaded bytes before promotion, rather than trusting upload exit status alone.
+    with tempfile.TemporaryDirectory(prefix="bsdraft-release-verify-") as directory:
+        _checked_gh("release", "download", tag, "--pattern", "winprob.npz", "--pattern", "metrics.json", "--dir", directory)
+        for name, expected in (("winprob.npz", model_digest), ("metrics.json", metrics_digest)):
+            if sha256_file(Path(directory) / name) != expected:
+                raise ValueError(f"uploaded {name} digest mismatch")
+
+
+def publish_model_bundle(model_path: Path = MODEL_PATH, metrics_path: Path = METRICS_PATH) -> dict:
+    report = validate_model_bundle(model_path, metrics_path)
+    repository = os.environ.get("GH_REPO") or _checked_gh("repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner").stdout.strip()
+    model_digest, metrics_digest = sha256_file(model_path), sha256_file(metrics_path)
+    tag = f"model-{model_digest[:16]}-{metrics_digest[:12]}"
+    prefix = f"https://github.com/{repository}/releases/download/{tag}"
+    manifest = validate_manifest({
+        "schema_version": 1, "release_id": tag,
+        "published_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "trained_at": report["trained_at"], "source_commit": report["source_commit"],
+        "dataset_sha256": report["dataset_sha256"], "analysis": report["analysis"],
+        "model": {"url": prefix + "/winprob.npz", "sha256": model_digest, "size_bytes": model_path.stat().st_size},
+        "metrics": {"url": prefix + "/metrics.json", "sha256": metrics_digest, "size_bytes": metrics_path.stat().st_size},
+    })
+    existing = _gh("release", "view", tag)
+    if existing.returncode:
+        with tempfile.TemporaryDirectory(prefix="bsdraft-release-stage-") as directory:
+            model_copy, metrics_copy = Path(directory) / "winprob.npz", Path(directory) / "metrics.json"
+            shutil.copyfile(model_path, model_copy)
+            shutil.copyfile(metrics_path, metrics_copy)
+            _checked_gh("release", "create", tag, str(model_copy), str(metrics_copy),
+                        "--draft", "--target", report["source_commit"],
+                        "--title", tag, "--notes", "Immutable model and matching temporal-test evaluation.", "--latest=false")
+    _verify_release_bundle(tag, model_digest, metrics_digest)
+    _checked_gh("release", "edit", tag, "--draft=false")
+    # GitHub's release body PATCH is atomic. Never delete/clobber the old pointer or model.
+    pointer = _gh("api", f"repos/{repository}/releases/tags/{POINTER_TAG}")
+    with tempfile.TemporaryDirectory(prefix="bsdraft-release-promote-") as directory:
+        body = Path(directory) / "manifest.json"
+        body.write_text(json.dumps(manifest, indent=2, allow_nan=False))
+        if pointer.returncode == 0:
+            release_id = json.loads(pointer.stdout)["id"]
+            patch = Path(directory) / "patch.json"
+            patch.write_text(json.dumps({"body": body.read_text()}))
+            _checked_gh("api", "--method", "PATCH", f"repos/{repository}/releases/{release_id}", "--input", str(patch))
+        elif "404" in pointer.stderr:
+            _checked_gh("release", "create", POINTER_TAG, "--target", report["source_commit"],
+                        "--title", "Current verified model", "--notes-file", str(body), "--latest=false")
+        else:
+            raise RuntimeError(f"could not read model pointer; leaving it unchanged: {pointer.stderr.strip()}")
+    promoted = parse_manifest(_checked_gh("api", f"repos/{repository}/releases/tags/{POINTER_TAG}").stdout)
+    if promoted["model"]["sha256"] != model_digest or promoted["metrics"]["sha256"] != metrics_digest:
+        raise ValueError("model pointer promotion readback mismatch")
+    print(f"published immutable bundle {tag}; promoted {POINTER_TAG}")
+    return manifest
+
 
 
 def _gh(*args: str) -> subprocess.CompletedProcess:
@@ -66,15 +204,14 @@ def publish(tag: str = DEFAULT_TAG) -> None:
 
 
 def publish_model(tag: str = DEFAULT_TAG) -> None:
-    """Upload winprob.npz to the release so an API with MODEL_URL set can hot-swap it. Run
-    after export_model.py (the crawler does this automatically on a retrain-on-shift)."""
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"No model at {MODEL_PATH} — export it first (scripts/export_model.py).")
-    _ensure_release(tag)
-    res = _gh("release", "upload", tag, str(MODEL_PATH), "--clobber")
-    if res.returncode != 0:
-        raise RuntimeError(f"gh release upload (model) failed: {res.stderr.strip()}")
-    print(f"published {MODEL_PATH.name} ({MODEL_PATH.stat().st_size / 1024:.0f} KB) -> release '{tag}'")
+    """Publish a verified immutable bundle and atomically promote its manifest.
+
+    The old data-latest/winprob.npz is deliberately retained during migration; model readers
+    must use MODEL_MANIFEST_URL before future publications become visible to them.
+    """
+    if tag != DEFAULT_TAG:
+        raise ValueError("model publication uses immutable versioned tags, not a custom rolling tag")
+    publish_model_bundle()
 
 
 def publish_stats(tag: str = DEFAULT_TAG) -> None:

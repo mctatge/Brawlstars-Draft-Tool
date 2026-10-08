@@ -3,8 +3,8 @@
 #
 # Free instances sleep after ~15 min idle (cold start ~30-60s); .github/workflows/keepwarm.yml
 # pings /api/health to keep it warm. The API has no torch dependency — it serves the model in
-# NumPy from winprob.npz and syncs both the match data (DATA_URL) and the model (MODEL_URL)
-# from the GitHub Release at runtime, hot-swapping each without a redeploy.
+# NumPy and syncs match data (DATA_URL) and verified model/metrics bundles
+# (MODEL_MANIFEST_URL), hot-swapping without a redeploy. MODEL_URL is legacy bootstrap only.
 services:
   - type: web
     name: bsdraft-api
@@ -23,6 +23,8 @@ services:
         value: https://github.com/mctatge/Brawlstars-Draft-Tool/releases/download/data-latest/matches.jsonl.gz
       - key: MODEL_URL
         value: https://github.com/mctatge/Brawlstars-Draft-Tool/releases/download/data-latest/winprob.npz
+      - key: MODEL_MANIFEST_URL
+        value: https://api.github.com/repos/mctatge/Brawlstars-Draft-Tool/releases/tags/model-current
       # Precomputed stats artifact (built off-box from ALL matches). When set, the API loads
       # these instead of rebuilding in memory — so it uses the whole dataset with no OOM, and
       # STATS_MAX_MATCHES below applies only to the fallback rebuild if this artifact can't load.

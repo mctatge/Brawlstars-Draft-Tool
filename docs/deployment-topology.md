@@ -6,6 +6,11 @@ before touching `deploy/`, `data/sync.py`, `render.yaml`, artifact export script
 keepwarm workflow, or any `*_URL` / `REFRESH_SECONDS` env var — and when debugging the
 live site.
 
+This is a constrained experimental public beta, not validated infrastructure for a large
+userbase. Read [reliability-and-publication.md](reliability-and-publication.md) for request
+bounds, CI gates, model bundles and the explicit first-migration procedure. `/demo` is a
+recorded walkthrough independent of the live API and account lookup.
+
 ## Home machine (has the key)
 
 The crawler runs on a home machine via four launchd plists under `deploy/`: crawler
@@ -16,9 +21,9 @@ to a GitHub Release.
 
 The crawler agent runs with `--dispatch-retrain-on-shift`, so a detected meta shift dispatches
 `.github/workflows/retrain-model.yml` instead of training on the laptop. That workflow downloads
-the published `matches.jsonl.gz`, trains with the same production command the old local retrain
-used (`train.py --class-synergy --candidates 3 --max-full-delta 0.0035`), exports
-`winprob.npz`, and uploads only that model asset when the train/export gates pass. The crawler
+the published `matches.jsonl.gz` and actual released incumbent, reserves a fresh evaluation
+snapshot, trains with mandatory incumbent and log-loss gates, exports matching weights/metrics,
+then verifies an immutable bundle before promoting the `model-current` release body. The crawler
 persists a drift-report fingerprint and debounces repeat dispatches, so one week-long shifted
 window does not launch a retrain every hour. The one manual path left is a **new brawler**: run
 `backend/scripts/refresh_reference.py` + retrain + a commit (the reference JSONs are bundled
@@ -65,10 +70,16 @@ The watchdog re-reads `.env` each cycle, so it confirms the fix with a one-shot
 
 ## Cloud API (Render, no key)
 
-The Render API (`render.yaml`) pulls via `DATA_URL` / `MODEL_URL` / `STATS_URL` /
+The Render API (`render.yaml`) pulls via `DATA_URL` / `MODEL_MANIFEST_URL` / `STATS_URL` /
 `RANK_INDEX_URL` / `META_REPORT_URL` / `ITEMSTATS_URL` every `REFRESH_SECONDS` and **hot-swaps rebuilt stats
 and a reloaded model with no restart** (see `data/sync.py` and the `_refresh_loop` /
 `lifespan` in `api/main.py`).
+
+`MODEL_URL` is only the legacy bootstrap while `model-current` is absent and no versioned
+bundle is cached. A bad/unreachable pointer retains last-good; it does not downgrade to a
+legacy download. `/api/model` exposes metrics only for a verified loaded bundle. Other
+artifacts stage and validate before replacing data, SHA or ETag. See the safeguard doc for
+the validation scope; the raw multi-GB archive is not fully parsed during download validation.
 
 The precomputed artifacts exist to fit Render's 512 MB free tier:
 
@@ -97,7 +108,9 @@ GitHub's public standard `ubuntu-latest` runner it has 4 vCPU, 16 GB RAM, and 14
 checkout is tiny, and the workflow downloads only the compressed release dataset, decompresses it
 to `data/raw/matches.jsonl`, and removes the compressed copy. It does not use Actions cache or
 upload-artifact storage. If the model gate, export guard, or release upload fails, it leaves the
-existing release model untouched and opens/updates a `model-stale` issue.
+existing model pointer untouched and opens/updates a `model-stale` issue. Failed evaluation
+attempts consume their reserved snapshot; retries need fresh test rows. Legacy migration is
+an explicit manual input, never the default unattended path.
 
 ## Per-visitor roster via Cloudflare Tunnel
 
