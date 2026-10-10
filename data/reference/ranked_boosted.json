@@ -1,18 +1,28 @@
 {
-  "_comment": "Ranked free / 'boosted' brawlers — the maxed brawlers everyone may use in Ranked this season, scraped from the release-notes 'Ranked' section by backend/bsdraft/collect/boosted.py (the boosted-watch CI job). 'active' is the current season; the serving layer resolves the names to ids and treats them as owned-at-full-loadout when personalizing. Hand-editable. All dates are UTC: a bare date means that whole UTC day, a full ISO datetime (e.g. 2026-08-19T10:00:00Z) pins the hour. 'valid_until' is the last moment a rotation serves (a bare date = through that day's end); it may sit on an entry or, legacy, at the top level for 'active'. An 'upcoming' entry may carry a hand-staged 'active_from': the loader hands over to it automatically from that moment (no API/blog exposes the live season, so the flip is human knowledge — stage it here rather than editing at midnight); until then, after valid_until, nothing serves — a deliberate fail-safe gap when the exact flip hour is unknown. An upcoming entry with no 'active_from' is never served, and one with no 'valid_until' is capped at 45 days past its start so an unmaintained file goes quiet instead of asserting a dead free set forever. 'grants' records brawlers made free OUTSIDE the seasonal rotation — the notes do not announce these — and survives a boosted-watch rewrite. A rewrite carries all these dates forward for seasons whose names still match. Current rotation verified at 2026-10-01T14:37:09Z. Confirmed in-game by the project owner on 2026-10-01; the published recent-match detector independently identifies the same trio. The release notes list Pierce instead of Amber, so preserve this verified correction when reviewing watcher PRs. valid_until is a 45-day safety ceiling from verification, not an announced season end.",
-  "source_url": "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-august-2026/",
-  "scraped_at": "2026-10-01",
+  "_comment": "Ranked free / 'boosted' brawlers — the maxed brawlers everyone may use in Ranked this season, scraped from the release-notes 'Ranked' section by backend/bsdraft/collect/boosted.py (the boosted-watch CI job). 'active' is the current season; the serving layer resolves the names to ids and treats them as owned-at-full-loadout when personalizing. Hand-editable. All dates are UTC: a bare date means that whole UTC day, a full ISO datetime (e.g. 2026-08-19T10:00:00Z) pins the hour. 'valid_until' is the last moment a rotation serves; it may sit on an entry or, legacy, at the top level for 'active'. An 'upcoming' entry may carry a hand-staged 'active_from': the loader hands over to it automatically from that moment; an entry without one is never served, and one with no 'valid_until' is capped at 45 days past its start so an unmaintained file goes quiet instead of asserting a dead free set forever. 'grants' records brawlers made free OUTSIDE the seasonal rotation — the notes do not announce these — and is carried through untouched by a rewrite. A boosted-watch rewrite carries these dates forward for seasons whose names still match.",
+  "source_url": "https://supercell.com/en/games/brawlstars/blog/release-notes/release-notes-august-2026",
+  "scraped_at": "2026-10-10",
+  "valid_until": null,
   "active": {
-    "season": "Season 2",
+    "season": "Season 1",
     "brawlers": [
-      "Ash",
-      "Mortis",
-      "Amber"
+      "Trunk",
+      "Willow",
+      "Kaze"
     ],
-    "featured_mode": "Hot Zone",
-    "valid_until": "2026-11-15T14:37:09Z"
+    "featured_mode": "Brawl Ball"
   },
-  "upcoming": [],
+  "upcoming": [
+    {
+      "season": "Season 2",
+      "brawlers": [
+        "Ash",
+        "Mortis",
+        "Pierce"
+      ],
+      "featured_mode": "Hot Zone"
+    }
+  ],
   "grants": [
     {
       "brawler": "Nori",
